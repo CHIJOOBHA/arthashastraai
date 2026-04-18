@@ -1,0 +1,127 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: intelligence
+    // Fields: source (string), content (string), timestamp (string), metadata (map)
+    //
+    // Collection: tweets
+    // Fields: tweetId (string), author (string), text (string), timestamp (string), processed (bool)
+    //
+    // Collection: responses
+    // Fields: targetId (string), responseText (string), status (string), timestamp (string)
+    //
+    // Collection: agent_logs
+    // Fields: agentName (string), action (string), status (string), timestamp (string)
+    //
+    // Collection: ledger
+    // Fields: task_id (string), agent_id (string), role (string), block_hash (string), signature (string), timestamp (string)
+    //
+    // Collection: offchain_storage
+    // Fields: payload (any), timestamp (string)
+    //
+    // Collection: users
+    // Fields: uid (string), email (string), role (string)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return request.auth != null &&
+        ((exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+         (request.auth.token.email == "jhansidharmana222@gmail.com" && request.auth.token.email_verified == true) ||
+         (request.auth.token.email == "chitti.bhargav3@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // Validation Functions
+    function isValidIntelligence(data) {
+      return data.keys().hasAll(['source', 'content', 'timestamp']) &&
+             data.source is string && data.content is string && data.timestamp is string;
+    }
+
+    function isValidTweet(data) {
+      return data.keys().hasAll(['tweetId', 'author', 'text', 'timestamp']) &&
+             data.tweetId is string && data.author is string && data.text is string && data.timestamp is string;
+    }
+
+    function isValidResponse(data) {
+      return data.keys().hasAll(['targetId', 'responseText', 'status', 'timestamp']) &&
+             data.targetId is string && data.responseText is string && 
+             data.status in ['pending', 'posted', 'failed'] && data.timestamp is string;
+    }
+
+    function isValidLog(data) {
+      return data.keys().hasAll(['agentName', 'action', 'status', 'timestamp']) &&
+             data.agentName is string && data.action is string && data.status is string && data.timestamp is string;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role']) &&
+             data.uid is string && data.email is string && data.role in ['admin', 'user'];
+    }
+
+    // Rules
+    match /intelligence/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Server SDK (Admin) bypasses this. No client-side writing permitted.
+    }
+
+    match /tweets/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Server SDK (Admin) bypasses this.
+    }
+
+    match /responses/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Server SDK (Admin) bypasses this.
+    }
+
+    match /agent_logs/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Server SDK (Admin) bypasses this.
+    }
+
+    match /ledger/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Server SDK (Admin) bypasses this.
+    }
+
+    match /offchain_storage/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Server SDK (Admin) bypasses this.
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if isAdmin(); // Only admins can manage users. No self-registration of roles.
+    }
+
+    match /conversations/{conversationId} {
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+        allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && get(/databases/$(database)/documents/conversations/$(conversationId)).data.userId == request.auth.uid;
+        allow update, delete: if false; // Immutable chat ledger
+      }
+    }
+    
+    match /config/{id} {
+      allow read: if isAdmin();
+      allow write: if false; // Only manageable via Backend/Admin SDK
+    }
+  }
+}
