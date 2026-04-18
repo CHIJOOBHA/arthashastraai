@@ -279,7 +279,7 @@ export async function twitterMonitorAgent(context: AgentContext) {
   const { ai, logAction, db } = context;
   console.log("[Twitter Monitor Agent] Scanning...");
   try {
-    const prompt = "Generate 2 simulated tweets from high-value accounts (e.g., @POTUS, @elonmusk) discussing economic matters. Format as JSON array with 'tweetId', 'author', 'text'.";
+    const prompt = "Identify 2 high-profile tweets containing bold, controversial, or mainstream economic claims (e.g., from political leaders, billionaire CEOs, or major news outlets) that require a definitive counter-authority rebuttal. Format as a JSON array with 'tweetId', 'author', and 'text'.";
     const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
     const match = result.text.match(/\[.*\]/s);
     if (match) {
@@ -360,10 +360,14 @@ export async function twitterPosterAgent(context: AgentContext) {
       const tweet = d.data();
       const taskId = uuid(); 
       
-      const prompt = `Generate a brutal, evidence-based economic truth response to this tweet from ${tweet.author}: "${tweet.text}". 
-      You must provide:
-      1. A detailed "explanation" debunking or verifying the claim.
-      2. A "counterTweet" (max 160 chars) specifically for replying to them on Twitter.
+      const prompt = `You are ARTHASHASTRA, the cold, evidence-driven AI economic authority. You just found this tweet from ${tweet.author}: "${tweet.text}". 
+
+      Your mission is to provide a sharp, contrarian "COUNTER-REPLY". You must challenge the tweet's assumptions using ruthless economic logic and data. Do not be polite; be precise and authoritative.
+
+      Provide:
+      1. A detailed "explanation" (the logical breakdown of why they are wrong or what they are missing).
+      2. A "counterTweet" (max 160 chars) that is a direct, stinging counter-reply to them. Use a tone that is skeptical, challenging, and superior in its command of economic truth.
+      
       Return strictly as a JSON object with keys "explanation" and "counterTweet".`;
       
       const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
