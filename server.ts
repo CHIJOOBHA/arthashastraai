@@ -127,9 +127,15 @@ async function startServer() {
           config: { systemInstruction: `Respond in ${language}.` }
         });
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        for await (const c of stream) if (c.text) res.write(c.text);
+        for await (const c of stream) {
+           if (c.text) res.write(c.text);
+        }
         res.end();
-      } catch (e) { res.status(500).send("Err"); }
+      } catch (e: any) { 
+        console.error("[Chat API Error]:", e);
+        const code = e.message?.includes('CONFIGURATION_REQUIRED') ? 401 : 500;
+        res.status(code).send(e.message || "Internal Server Error"); 
+      }
     });
 
     // Twitter OAuth Routes

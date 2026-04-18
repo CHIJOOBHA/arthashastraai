@@ -333,7 +333,7 @@ export default function App() {
 
       setMessages((prev) => [...prev, { id: modelMessageId, role: 'model', text: '' }]);
 
-      const stream = sendMessage(history, trimmedText, language);
+      const stream = sendMessage(history, trimmedText, language, { intelligence });
       
       for await (const chunk of stream) {
         fullText += chunk.text;
@@ -370,12 +370,21 @@ export default function App() {
         });
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to send message:', error);
+      
+      let errorText = "The truth is being suppressed by technical barriers. Please try again.";
+      
+      if (error.message?.includes('CONFIGURATION_REQUIRED') || error.message?.includes('API_KEY')) {
+        errorText = "ARTHASHASTRA ERROR: Configuration required. Please set GEMINI_API_KEY in the Secrets panel to enable neural link.";
+      } else if (error.message === 'RESOURCE_EXHAUSTED' || error.message?.includes('429')) {
+        errorText = "ARTHASHASTRA ERROR: Neural bandwidth exhausted (Quota Exceeded). The truth is costly; try again later.";
+      }
+      
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        text: "The truth is being suppressed by technical barriers. Please try again.",
+        text: errorText,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
