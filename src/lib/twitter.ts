@@ -104,3 +104,42 @@ export async function postTruthTweet(text: string, db?: any, replyToId?: string)
     throw error;
   }
 }
+
+export async function likeTweet(tweetId: string, db?: any) {
+  const client = await getTwitterClient(db);
+  if (!client) return { success: false, simulated: true };
+  try {
+    const me = await client.v2.me();
+    await client.v2.like(me.data.id, tweetId);
+    return { success: true, simulated: false };
+  } catch (e) {
+    console.error("[Twitter] Like failed:", e);
+    return { success: false, simulated: false };
+  }
+}
+
+export async function retweetTweet(tweetId: string, db?: any) {
+  const client = await getTwitterClient(db);
+  if (!client) return { success: false, simulated: true };
+  try {
+    const me = await client.v2.me();
+    await client.v2.retweet(me.data.id, tweetId);
+    return { success: true, simulated: false };
+  } catch (e) {
+    console.error("[Twitter] Retweet failed:", e);
+    return { success: false, simulated: false };
+  }
+}
+
+export async function followUser(userId: string, db?: any) {
+  const client = await getTwitterClient(db);
+  if (!client) return { success: false, simulated: true };
+  try {
+    const me = await client.v2.me();
+    await client.v2.follow(me.data.id, userId);
+    return { success: true, simulated: false };
+  } catch (e) {
+    console.error("[Twitter] Follow failed:", e);
+    return { success: false, simulated: false };
+  }
+}

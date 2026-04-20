@@ -1,5 +1,5 @@
 import { initializeApp, setLogLevel } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, TwitterAuthProvider, signInWithPopup, signInAnonymously, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { getFirestore, collection, doc, getDoc, setDoc, onSnapshot, query, orderBy, limit, addDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -32,9 +32,19 @@ export const db = getFirestore(app, !isPlaceholder(finalConfig.firestoreDatabase
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
+export const twitterProvider = new TwitterAuthProvider();
+
 // Auth Helpers
 export const signInWithGoogle = () => {
   return signInWithPopup(auth, googleProvider);
+};
+
+export const signInWithTwitter = () => {
+  return signInWithPopup(auth, twitterProvider);
+};
+
+export const signInAnonymous = () => {
+  return signInAnonymously(auth);
 };
 export const signOut = () => auth.signOut();
 
@@ -137,6 +147,9 @@ export interface Tweet {
   text: string;
   timestamp: string;
   processed: boolean;
+  userApproved?: boolean;
+  draftRebuttal?: string;
+  draftLogic?: string;
 }
 
 export interface AgentResponse {

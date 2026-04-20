@@ -2,11 +2,12 @@
 import { GoogleGenAI } from "@google/genai";
 import { getEnv } from "./env.js";
 import { witnessBlock, AitihyaBlock } from "./aitihya.js";
-import { postTruthTweet } from "./twitter.js";
+import { postTruthTweet, likeTweet, retweetTweet, followUser } from "./twitter.js";
 
 export interface AgentContext {
   ai: any;
   db: any;
+  appUrl?: string;
   logAction: (agentName: string, action: string, status: string) => Promise<void>;
 }
 
@@ -141,22 +142,31 @@ export function createTriad(domainName: string, collectionPrompt: string) {
 
   const validator = async (ctx: AgentContext, state: ChainState): Promise<ChainState | null> => {
     const { ai, logAction } = ctx;
-    const agentId = `cert_${domainName.toLowerCase()}_validator_${Math.random().toString(36).substring(2, 7)}`;
+    const agentId = `cert_${domainName.toLowerCase()}_validator_${uuid().substring(0, 5)}`;
     
-    console.log(`[${domainName} Validator] Validating ${state.data.length} items...`);
+    if (state.data.length === 0) return state;
+
+    console.log(`[${domainName} Validator] Batch validating ${state.data.length} items...`);
     try {
       const valid: ValidatedData[] = [];
-      for (const item of state.data) {
-        const prompt = `You are an Absolute Economy Validator. Your target is to find facts for evidence. Validate this ${domainName} data for absolute accuracy. Assign a confidence score (0-100) based strictly on evidentiary support and provide enriched context. Data: ${item.content}. Return JSON with 'confidenceScore' (number) and 'enrichedContext' (string).`;
-        const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
-        const match = result.text.match(/\{.*\}/s);
-        if (match) {
-          const parsed = JSON.parse(match[0]);
-          if (parsed.confidenceScore > 40) {
+      const prompt = `You are the Absolute Economy Validator. Validate these ${domainName} data points for absolute accuracy. 
+      Assign a confidence score (0-100) and provide enriched context for each.
+      Data Points:
+      ${state.data.map((item, i) => `${i}: ${item.content}`).join("\n")}
+      
+      Return as a JSON array of objects with 'index' (matching the input number), 'confidenceScore' (number), and 'enrichedContext' (string).`;
+      
+      const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
+      const match = result.text.match(/\[.*\]/s);
+      if (match) {
+        const results = JSON.parse(match[0]);
+        for (const res of results) {
+          const item = state.data[res.index];
+          if (item && res.confidenceScore > 40) {
             valid.push({
               ...item,
-              confidenceScore: parsed.confidenceScore,
-              enrichedContext: parsed.enrichedContext
+              confidenceScore: res.confidenceScore,
+              enrichedContext: res.enrichedContext
             });
           }
         }
@@ -168,78 +178,82 @@ export function createTriad(domainName: string, collectionPrompt: string) {
       return { taskId: state.taskId, data: valid };
     } catch (e) { 
       console.error(`[${domainName} Validator] Error:`, e);
-      return null; 
+      return state; 
     }
   };
 
   const summarizer = async (ctx: AgentContext, state: ChainState): Promise<void> => {
     const { ai, logAction, db } = ctx;
-    const agentId = `cert_${domainName.toLowerCase()}_summarizer_${Math.random().toString(36).substring(2, 7)}`;
+    const agentId = `cert_${domainName.toLowerCase()}_summarizer_${uuid().substring(0, 5)}`;
     
-    console.log(`[${domainName} Summarizer] Publishing insights...`);
+    if (state.data.length === 0) return;
+
+    console.log(`[${domainName} Summarizer] Batch publishing ${state.data.length} insights...`);
     try {
-      const insights = [];
+      const toProcess = [];
       for (const item of state.data) {
         // Deduplication Check
         let exists = false;
         if (db.collection) {
           const col = typeof db.collection === 'function' ? db.collection('intelligence') : db.collection;
-          if (col.where) {
-            const snap = await col.where("content", "==", item.content).limit(1).get();
-            exists = !snap.empty;
-          } else {
-            const { query, collection, where, limit, getDocs } = await import("firebase/firestore");
-            const q = query(collection(db, "intelligence"), where("content", "==", item.content), limit(1));
-            const snap = await getDocs(q);
-            exists = !snap.empty;
-          }
-        } else {
-          // Client SDK style fallback
           const { query, collection, where, limit, getDocs } = await import("firebase/firestore");
           const q = query(collection(db, "intelligence"), where("content", "==", item.content), limit(1));
           const snap = await getDocs(q);
           exists = !snap.empty;
         }
+        if (!exists) toProcess.push(item);
+      }
 
-        if (exists) continue;
+      if (toProcess.length === 0) return;
 
-        const prompt = `You are an Absolute Economy Summarizer. Your only goal is the truth. Summarize this validated ${domainName} intelligence into a concise, high-impact insight that reveals the absolute economic reality. Context: ${item.enrichedContext}. Content: ${item.content}. Return JSON with 'insight' (string) and 'severity' (High/Medium/Low).`;
-        const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
-        const match = result.text.match(/\{.*\}/s);
-        if (match) {
-          const parsed = JSON.parse(match[0]);
-          insights.push(parsed);
-          
+      const prompt = `You are the Absolute Economy Summarizer. Summarize these ${domainName} data points into concise, high-impact insights revealing absolute economic reality.
+      Data:
+      ${toProcess.map((item, i) => `${i}: ${item.content} (Context: ${item.enrichedContext})`).join("\n")}
+      
+      Return as a JSON array of objects with 'index', 'insight' (string), and 'severity' (High/Medium/Low).`;
+      
+      const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
+      const match = result.text.match(/\[.*\]/s);
+      
+      if (match) {
+        const results = JSON.parse(match[0]);
+        const insights = [];
+        for (const res of results) {
+          const original = toProcess[res.index];
+          if (!original) continue;
+
+          const explanationId = Math.random().toString(36).substring(2, 11);
           const intelData = {
             source: `${domainName} Triad`,
-            content: parsed.insight,
+            content: res.insight,
+            explanationId,
+            isBroadcasted: false,
             agentSecret: "arthashastra-server-secret-2026",
             metadata: { 
-              severity: parsed.severity, 
-              confidence: item.confidenceScore + "%", 
+              severity: res.severity, 
+              confidence: original.confidenceScore + "%", 
               taskId: state.taskId
             },
             timestamp: new Date().toISOString()
           };
 
-          if (db.collection) {
-            const col = typeof db.collection === 'function' ? db.collection('intelligence') : db.collection;
-            if (col.add) {
-              await col.add(intelData);
-            } else {
-              const { addDoc, collection } = await import("firebase/firestore");
-              await addDoc(collection(db, "intelligence"), intelData);
-            }
-          } else {
-            const { addDoc, collection } = await import("firebase/firestore");
-            await addDoc(collection(db, "intelligence"), intelData);
-          }
+          const { addDoc, doc, setDoc, collection } = await import("firebase/firestore");
+          await addDoc(collection(db, "intelligence"), intelData);
+          
+          // Pre-generate the detailed explanation doc so the Broadcaster's link is valid
+          await setDoc(doc(db, "explanations", explanationId), {
+            id: explanationId,
+            content: `Master Insight for ${domainName}: ${res.insight}`,
+            targetTweetId: "intel-" + explanationId,
+            timestamp: new Date().toISOString()
+          });
+
+          insights.push(res);
         }
+        
+        await commitBlock(ctx, state.taskId, agentId, "Summarizer", insights, { insightsGenerated: insights.length });
+        await logAction(`${domainName}Summarizer`, "Committed batch summarizer block", "success");
       }
-      
-      await commitBlock(ctx, state.taskId, agentId, "Summarizer", insights, { insightsGenerated: insights.length });
-      await logAction(`${domainName}Summarizer`, "Committed final summarizer block", "success");
-      
     } catch (e) {
       console.error(`[${domainName} Summarizer] Error:`, e);
     }
@@ -259,6 +273,7 @@ export const marketsEquitiesTriad = createTriad("MarketsEquities", "Find 2 raw d
 export const marketsDerivativesTriad = createTriad("MarketsDerivatives", "Find 2 raw data points on derivatives trading, options volume, or futures markets. Return JSON array with 'content' and 'source'.");
 export const regionalUSTriad = createTriad("RegionalUS", "Find 2 raw news items from the US regarding federal economic developments. Return JSON array with 'content' and 'source'.");
 export const regionalChinaTriad = createTriad("RegionalChina", "Find 2 raw news items from China regarding PBOC policy or industrial output. Return JSON array with 'content' and 'source'.");
+export const cryptoeconomicTriad = createTriad("Cryptoeconomics", "Find 2 raw data points on cryptocurrency adoption for trade, DeFi protocol stability, or digital sovereignty movements. Return JSON array with 'content' and 'source'.");
 export const darkWebVettingTriad = createTriad("DarkWebVetting", "Find 2 raw data points from vetted alternative sources. Return JSON array with 'content' and 'source'.");
 
 export async function runTriad(triad: any, context: AgentContext) {
@@ -277,9 +292,15 @@ export async function runTriad(triad: any, context: AgentContext) {
 
 export async function twitterMonitorAgent(context: AgentContext) {
   const { ai, logAction, db } = context;
-  console.log("[Twitter Monitor Agent] Scanning...");
+  console.log("[Twitter Monitor Agent] Scanning for engagement targets...");
   try {
-    const prompt = "Identify 2 high-profile tweets containing bold, controversial, or mainstream economic claims (e.g., from political leaders, billionaire CEOs, or major news outlets) that require a definitive counter-authority rebuttal. Format as a JSON array with 'tweetId', 'author', and 'text'.";
+    const prompt = `You are the Twitter Engagement Agent for ARTHASHASTRA. 
+    Role: Responsible for connecting the app backend to the official Twitter account.
+    Framing: The agent simulates human-like engagement patterns on Twitter by posting, replying, and following accounts according to defined workflows and ethical rules.
+    
+    Task: Identify 2 high-profile tweets containing bold, controversial, or mainstream economic claims (e.g., from political leaders, billionaire CEOs, or major news outlets) that require a definitive counter-authority rebuttal. 
+    
+    Format as a JSON array with 'tweetId', 'author', 'authorId', and 'text'.`;
     const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
     const match = result.text.match(/\[.*\]/s);
     if (match) {
@@ -297,19 +318,25 @@ export async function twitterMonitorAgent(context: AgentContext) {
             const snap = await getDocs(q);
             exists = !snap.empty;
           }
-        } else {
-          const { query, collection, where, limit, getDocs } = await import("firebase/firestore");
-          const q = query(collection(db, "tweets"), where("tweetId", "==", tweet.tweetId), limit(1));
-          const snap = await getDocs(q);
-          exists = !snap.empty;
         }
 
         if (exists) continue;
+
+        const draftPrompt = `You are ARTHASHASTRA. Draft a context-aware, sharp, contrarian counter-reply to this tweet: "${tweet.text}". 
+        Ensure the reply includes attribution or implicit links back to the app's mission for economic truth.
+        Return JSON with 'draftRebuttal' and 'logic'.`;
+        const draftResult = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: draftPrompt });
+        const draftMatch = draftResult.text.match(/\{.*\}/s);
+        const draftData = draftMatch ? JSON.parse(draftMatch[0]) : { draftRebuttal: "The data suggests otherwise.", logic: "Conflicting economic signals." };
 
         const tweetData = {
           ...tweet, 
           timestamp: new Date().toISOString(), 
           processed: false,
+          userApproved: false,
+          draftRebuttal: draftData.draftRebuttal,
+          draftLogic: draftData.logic,
+          engagementType: "rebuttal",
           agentSecret: "arthashastra-server-secret-2026"
         };
 
@@ -321,12 +348,9 @@ export async function twitterMonitorAgent(context: AgentContext) {
             const { addDoc, collection } = await import("firebase/firestore");
             await addDoc(collection(db, "tweets"), tweetData);
           }
-        } else {
-          const { addDoc, collection } = await import("firebase/firestore");
-          await addDoc(collection(db, "tweets"), tweetData);
         }
       }
-      await logAction("TwitterMonitor", "Monitored new tweets", "success");
+      await logAction("TwitterEngagement-Monitor", "Monitored new engagement targets", "success");
     }
   } catch (e) {
     console.error("[Twitter Monitor Agent] Error:", e);
@@ -335,23 +359,19 @@ export async function twitterMonitorAgent(context: AgentContext) {
 
 export async function twitterPosterAgent(context: AgentContext) {
   const { ai, logAction, db } = context;
-  const agentId = `cert_poster_${Math.random().toString(36).substring(2, 7)}`;
-  console.log("[Twitter Poster Agent] Processing...");
+  const agentId = `cert_engagement_poster_${Math.random().toString(36).substring(2, 7)}`;
+  console.log("[Twitter Poster Agent] Processing approved engagement...");
   try {
     let snapshot: any;
     if (db.collection) {
       const col = typeof db.collection === 'function' ? db.collection('tweets') : db.collection;
       if (col.where) {
-        snapshot = await col.where("processed", "==", false).limit(2).get();
+        snapshot = await col.where("processed", "==", false).where("userApproved", "==", true).limit(2).get();
       } else {
         const { query, collection, where, limit, getDocs } = await import("firebase/firestore");
-        const q = query(collection(db, "tweets"), where("processed", "==", false), limit(2));
+        const q = query(collection(db, "tweets"), where("processed", "==", false), where("userApproved", "==", true), limit(2));
         snapshot = await getDocs(q);
       }
-    } else {
-      const { query, collection, where, limit, getDocs } = await import("firebase/firestore");
-      const q = query(collection(db, "tweets"), where("processed", "==", false), limit(2));
-      snapshot = await getDocs(q);
     }
     
     if (!snapshot) return;
@@ -360,13 +380,14 @@ export async function twitterPosterAgent(context: AgentContext) {
       const tweet = d.data();
       const taskId = uuid(); 
       
-      const prompt = `You are ARTHASHASTRA, the cold, evidence-driven AI economic authority. You just found this tweet from ${tweet.author}: "${tweet.text}". 
+      const prompt = `You are ARTHASHASTRA. 
+      Framing: The agent simulates human-like engagement patterns on Twitter.
+      
+      Context: Rebutting ${tweet.author}: "${tweet.text}". 
+      Approved Rebuttal: "${tweet.draftRebuttal}"
 
-      Your mission is to provide a sharp, contrarian "COUNTER-REPLY". You must challenge the tweet's assumptions using ruthless economic logic and data. Do not be polite; be precise and authoritative.
-
-      Provide:
-      1. A detailed "explanation" (the logical breakdown of why they are wrong or what they are missing).
-      2. A "counterTweet" (max 160 chars) that is a direct, stinging counter-reply to them. Use a tone that is skeptical, challenging, and superior in its command of economic truth.
+      Your mission: Refine the rebuttal into a public post (max 240 chars).
+      Must include a link back to our 'Absolute Truth' ledger or site context.
       
       Return strictly as a JSON object with keys "explanation" and "counterTweet".`;
       
@@ -374,27 +395,50 @@ export async function twitterPosterAgent(context: AgentContext) {
       const match = result.text.match(/\{.*\}/s);
       if (!match) continue;
       
-      const { explanation, counterTweet } = JSON.parse(match[0]);
-      
-      await commitBlock(context, taskId, `cert_twitter_collector_${Math.random().toString(36).substring(2, 7)}`, "Collector", tweet, { source: "twitter" });
-      
-      const isApproved = await complianceAgent(context, explanation + " " + counterTweet, taskId);
-      
-      if (isApproved) {
-        // Real Twitter Posting Integration
-        let twitterResult = { success: false, simulated: true };
-        try {
-          // We post the counterTweet as our public-facing rebuttal
-          const tweetText = `${counterTweet}\n\n[Witnessed on Aitihya Chain]`;
-          const result = await postTruthTweet(tweetText, context.db, tweet.tweetId);
-          if (result.success) {
-            twitterResult = { success: true, simulated: false };
-          }
-        } catch (twErr) {
-          console.error("[Twitter Poster Agent] Real tweet failed, falling back to ledger-only:", twErr);
-        }
+        const { explanation, counterTweet } = JSON.parse(match[0]);
+        
+        // Generate a unique ID for the explanation
+        const explanationId = Math.random().toString(36).substring(2, 11); // Simple random ID
+        const appUrl = context.appUrl || "https://arthashastra-ai.com"; 
+        const explanationUrl = `${appUrl}/explanation/${explanationId}`;
 
-        await commitBlock(context, taskId, agentId, "Poster", { explanation, counterTweet, targetId: tweet.tweetId, twitterResult }, { status: "posted" });
+        // Store Explanation in Firestore
+        const explanationData = {
+          id: explanationId,
+          content: explanation,
+          targetTweetId: tweet.tweetId,
+          timestamp: new Date().toISOString(),
+          agentSecret: "arthashastra-server-secret-2026"
+        };
+        
+        if (db.collection) {
+          const expCol = typeof db.collection === 'function' ? db.collection('explanations') : db.collection;
+          if (expCol.doc) {
+            await expCol.doc(explanationId).set(explanationData);
+          } else {
+            const { setDoc, doc, collection } = await import("firebase/firestore");
+            await setDoc(doc(db, "explanations", explanationId), explanationData);
+          }
+        }
+        
+        await commitBlock(context, taskId, `cert_twitter_collector_${Math.random().toString(36).substring(2, 7)}`, "Collector", tweet, { source: "twitter" });
+        
+        const isApproved = await complianceAgent(context, explanation + " " + counterTweet, taskId);
+        
+        if (isApproved) {
+          let twitterResult = { success: false, simulated: true };
+          try {
+            // Append the tracking link to the tweet
+            const tweetText = `${counterTweet}\n\nEconomic Explanation: ${explanationUrl}\n\n[Authored by Arthashastra AI]`;
+            const result = await postTruthTweet(tweetText, context.db, tweet.tweetId);
+            if (result.success) {
+              twitterResult = { success: true, simulated: false };
+            }
+          } catch (twErr) {
+            console.error("[Twitter Poster Agent] Real tweet failed:", twErr);
+          }
+
+        await commitBlock(context, taskId, agentId, "EngagementPoster", { explanation, counterTweet, targetId: tweet.tweetId, twitterResult }, { status: "posted" });
         
         const responseData = {
           targetId: tweet.tweetId, 
@@ -408,29 +452,103 @@ export async function twitterPosterAgent(context: AgentContext) {
 
         if (db.collection) {
           const col = typeof db.collection === 'function' ? db.collection('responses') : db.collection;
-          if (col.add) {
-            await col.add(responseData);
+          if (col.add) await col.add(responseData);
+          
+          const docId = d.id;
+          if (typeof db.doc === 'function') {
+            await db.collection('tweets').doc(docId).update({ processed: true });
           } else {
-            const { addDoc, collection } = await import("firebase/firestore");
-            await addDoc(collection(db, "responses"), responseData);
+            const { doc, updateDoc } = await import("firebase/firestore");
+            await updateDoc(doc(db, "tweets", docId), { processed: true });
           }
-
-          const tweetRef = typeof db.doc === 'function' ? db.doc(`tweets/${d.id}`) : null;
-          if (tweetRef && tweetRef.update) {
-            await tweetRef.update({ processed: true, agentSecret: "arthashastra-server-secret-2026" });
-          } else {
-            const { doc, setDoc } = await import("firebase/firestore");
-            await setDoc(doc(db, "tweets", d.id), { processed: true, agentSecret: "arthashastra-server-secret-2026" }, { merge: true });
-          }
-        } else {
-          const { addDoc, collection, doc, setDoc } = await import("firebase/firestore");
-          await addDoc(collection(db, "responses"), responseData);
-          await setDoc(doc(db, "tweets", d.id), { processed: true, agentSecret: "arthashastra-server-secret-2026" }, { merge: true });
         }
-        await logAction("TwitterPoster", `Posted reply to ${tweet.author}`, "success");
+        await logAction("TwitterEngagement-Poster", `Posted engagement response to ${tweet.author}`, "success");
       }
     }
   } catch (e) {
     console.error("[Twitter Poster Agent] Error:", e);
+  }
+}
+
+export async function twitterBroadcasterAgent(context: AgentContext) {
+  const { db, appUrl } = context;
+  const { postTruthTweet } = await import("./twitter.js");
+  console.log("[Twitter Broadcaster Agent] Pipe: Fetching Intelligence for broadcast...");
+  
+  try {
+    // Fetch latest intelligence not yet broadcasted
+    let snapshot: any;
+    if (db.collection) {
+      const col = typeof db.collection === 'function' ? db.collection('intelligence') : db.collection;
+      const { query, collection, where, limit, getDocs, orderBy } = await import("firebase/firestore");
+      const q = query(collection(db, "intelligence"), where("isBroadcasted", "==", false), orderBy("timestamp", "desc"), limit(1));
+      snapshot = await getDocs(q);
+    }
+
+    if (!snapshot || snapshot.empty) {
+      console.log("[Twitter Broadcaster Agent] No new intelligence to broadcast.");
+      return;
+    }
+
+    const intelDoc = snapshot.docs[0];
+    const intel = intelDoc.data();
+    
+    // Middle Man Logic: No generation, just formatting and piping
+    const explanationId = intel.explanationId || Math.random().toString(36).substring(2, 11);
+    const trackingUrl = `${appUrl || "https://arthashastra-ai.com"}/explanation/${explanationId}`;
+    
+    const tweetText = `${intel.content}\n\nAnalytical Context: ${trackingUrl}\n\n[Witnessed by Arthashastra AI]`;
+    const broadcastResult = await postTruthTweet(tweetText, db, "broadcast-" + Date.now());
+    
+    if (broadcastResult.success) {
+      const { updateDoc } = await import("firebase/firestore");
+      await updateDoc(intelDoc.ref, { 
+        isBroadcasted: true, 
+        broadcastTimestamp: new Date().toISOString() 
+      });
+      await context.logAction("TwitterBroadcaster", "Intelligence broadcasted via pipe", "success");
+    }
+  } catch (e) {
+    console.error("[Twitter Broadcaster Agent] Pipe Error:", e);
+  }
+}
+
+export async function twitterInteractionAgent(context: AgentContext) {
+  const { ai, logAction, db } = context;
+  console.log("[Twitter Interaction Agent] Scouting for likes/follows...");
+  try {
+    const prompt = `You are the Twitter Engagement Agent for ARTHASHASTRA.
+    Framing: The agent simulates human-like engagement patterns on Twitter by posting, replying, and following accounts according to defined workflows and ethical rules.
+    
+    Task: Find 3 trending topics or hashtags aligned with 'Economic Truth', 'Common Man Rights', or 'Anti-Corruption'.
+    Format as JSON array with 'topic', 'reason'.`;
+    const result = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: prompt });
+    const match = result.text.match(/\[.*\]/s);
+    if (!match) return;
+
+    const topics = JSON.parse(match[0]);
+    for (const top of topics) {
+      const searchPrompt = `As ARTHASHASTRA, identify one influential account or high-impact tweet related to "${top.topic}".
+      Reason: ${top.reason}.
+      Return JSON with 'type' (like_retweet or follow), 'id' (tweetId or userId), 'handle'.`;
+      const searchResult = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: searchPrompt });
+      const searchMatch = searchResult.text.match(/\{.*\}/s);
+      if (searchMatch) {
+         const action = JSON.parse(searchMatch[0]);
+         let res = { success: false, simulated: true };
+         
+         if (action.type === 'like_retweet') {
+           await likeTweet(action.id, db);
+           res = await retweetTweet(action.id, db);
+         } else if (action.type === 'follow') {
+           res = await followUser(action.id, db);
+         }
+         
+         await logAction("TwitterEngagement-Interaction", `Action: ${action.type} on ${action.handle}`, res.success ? "success" : "failed");
+         await commitBlock(context, uuid(), "cert_interaction_agent", "Interaction", action, { result: res.success ? "performed" : "simulated" });
+      }
+    }
+  } catch (e) {
+    console.error("[Twitter Interaction Agent] Error:", e);
   }
 }

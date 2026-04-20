@@ -3,23 +3,22 @@ service cloud.firestore {
   match /databases/{database}/documents {
     
     // ==========================================
-    // PILLAR 0: DEFAULT DENY CATCH-ALL
+    // DEFAULT DENY CATCH-ALL
     // ==========================================
     match /{document=**} {
       allow read, write: if false;
     }
 
     // ==========================================
-    // PILLAR 3: GLOBAL HELPERS & ID HARDENING
+    // GLOBAL HELPERS
     // ==========================================
     function isSignedIn() { return request.auth != null; }
     function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
     function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
-    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
-
-    // PILLAR 4: TIERED IDENTITY (ADMIN SUPREMACY)
+    
+    // AD-HOC ADMINS: Hardcoded for bootstrap, but usually checked via /admins/ collection
     function isAdmin() { 
-      return isSignedIn() && (
+      return isSignedIn() && isVerified() && (
         request.auth.token.email == "jhansidharmana222@gmail.com" || 
         request.auth.token.email == "chitti.bhargav3@gmail.com" ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
@@ -28,9 +27,10 @@ service cloud.firestore {
 
     function incoming() { return request.resource.data; }
     function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
 
     // ==========================================
-    // PILLAR 2: VALIDATION BLUEPRINTS
+    // ENTITY VALIDATORS
     // ==========================================
     
     function isValidUser(data) {
@@ -40,7 +40,6 @@ service cloud.firestore {
              data.role in ['admin', 'user'];
     }
 
-    // PILLAR 5: ARRAY / LIST GUARDING (Simulated via strict keys and sizes)
     function isValidMessage(data) {
       return data.keys().hasAll(['id', 'role', 'text', 'userId']) &&
              data.id is string && data.id.size() <= 128 &&
@@ -57,23 +56,23 @@ service cloud.firestore {
     }
 
     // ==========================================
-    // PILLAR 6: PII ISOLATION & COLLECTION RULES
+    // COLLECTION RULES
     // ==========================================
 
-    // PUBLIC READ-ONLY INTEL
+    // PUBLIC READ-ONLY
     match /intelligence/{id} {
       allow get: if isValidId(id);
       allow list: if true;
-      allow write: if false; // System-only write via Admin SDK
+      allow write: if false; // System only
     }
 
     match /explanations/{id} {
       allow get: if isValidId(id);
-      allow list: if true; 
-      allow write: if false; // System-only
+      allow list: if true;
+      allow write: if false; // System only
     }
 
-    // PILLAR 8: SECURE LIST QUERIES (IDENTITIES)
+    // ADMIN ONLY (AUDIT LOGS)
     match /agent_logs/{id} {
       allow read: if isAdmin();
       allow write: if false;
@@ -89,73 +88,52 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    match /ledger/{id} {
-      allow read: if isAdmin();
-      allow write: if false;
-    }
-
-    // PILLAR 4: TIERED PAYMENTS
     match /payments/{id} {
       allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow write: if false; // Backend only
+      allow write: if false; // Only via backend
     }
 
-    // PILLAR 6: USER PROFILE PII ISOLATION
+    // USER PROFILES
     match /users/{uid} {
       allow get: if isOwner(uid) || isAdmin();
       allow list: if isAdmin();
       
-      // Update Action Partitioning
+      // Strict update: users cannot change their own roles
       allow update: if (isOwner(uid) && 
                       isValidUser(incoming()) && 
-                      // Pillar 4: Users cannot change their own roles
                       incoming().role == existing().role &&
-                      // Action: View Explanation
                       incoming().diff(existing()).affectedKeys().hasOnly(['explanationViewCount'])) ||
                     isAdmin();
       
       allow create: if isOwner(uid) && 
                       isValidUser(incoming()) && 
-                      incoming().role == 'user'; // Default registration as user
+                      incoming().role == 'user'; // Default to user
     }
 
     match /subscriptions/{uid} {
       allow get: if isOwner(uid) || isAdmin();
       allow list: if isAdmin();
-      allow write: if isAdmin(); // Only backend oracle
+      allow write: if isAdmin(); // Only backend
     }
 
-    // PILLAR 1: MASTER GATE (CHRONICLE ISOLATION)
+    // CHAT SECTORS (THE WITNESS LEDGER)
     match /conversations/{id} {
       allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
       allow create: if isSignedIn() && isValidConversation(incoming()) && isValidId(id);
-      
-      // Action: Update Metadata
-      allow update: if isSignedIn() && (
-        (isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageAt', 'updatedAt', 'title'])) ||
-        isAdmin()
-      );
-      
-      allow delete: if isAdmin(); // Only administrative removal
+      allow update: if isSignedIn() && isOwner(existing().userId) && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageAt', 'updatedAt', 'title']);
+      allow delete: if false;
 
       match /messages/{messageId} {
-        // Pillar 1: Relational Sync Check
+        // Master Gate: Check parent conversation ownership
         function parentOwned() {
           return get(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid;
         }
 
         allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-        
-        // Pillar 10: Temporal Integrity & Pillar 1: Relational Guard
-        allow create: if isSignedIn() && 
-                        isValidMessage(incoming()) && 
-                        parentOwned() && 
-                        isValidId(messageId) &&
-                        incoming().createdAt == request.time;
-        
-        // Pillar 2: Terminal State / ImmutableChain
-        allow update, delete: if isAdmin(); 
+        allow create: if isSignedIn() && isValidMessage(incoming()) && parentOwned() && isValidId(messageId);
+        allow update, delete: if false; // Immutable Chain
       }
     }
   }

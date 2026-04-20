@@ -4,12 +4,12 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, User, Landmark, Globe, Briefcase, ChevronRight, TrendingUp, ShieldAlert, AlertTriangle, Languages, Loader2, LayoutDashboard, MessageSquare, MessageCircle, Activity, Database, Twitter, LogOut, LogIn, ExternalLink, Clock, Blocks, Shield, Search, Calendar, Zap, CheckCircle2 } from 'lucide-react';
+import { Send, User, Landmark, Globe, Briefcase, ChevronRight, TrendingUp, ShieldAlert, AlertTriangle, Languages, Loader2, LayoutDashboard, MessageSquare, MessageCircle, Activity, Database, Twitter, LogOut, LogIn, ExternalLink, Clock, Blocks, Shield, Search, Calendar, Zap, CheckCircle2, Coins, X, Lock, Link, Ghost, Terminal } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from 'motion/react';
 import { sendMessage } from './lib/gemini';
 import { SUPPORTED_LANGUAGES, TRANSLATIONS } from './translations';
-import { auth, db, signInWithGoogle, signOut, IntelligenceItem, Tweet, AgentLog, AgentResponse, handleFirestoreError, OperationType } from './lib/firebase';
+import { auth, db, signInWithGoogle, signInWithTwitter, signInAnonymous, signOut, IntelligenceItem, Tweet, AgentLog, AgentResponse, handleFirestoreError, OperationType } from './lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { collection, query, orderBy, limit, onSnapshot, addDoc, getDoc, doc } from 'firebase/firestore';
 import { 
@@ -22,27 +22,84 @@ import { witnessBlock, AitihyaBlock } from './lib/aitihya';
 import { Message } from './lib/firebase';
 import { AitihyaHistory } from './components/AitihyaHistory';
 import { saveMessage, getMessages } from './lib/chatStore';
+import { TermsPage, PrivacyPage } from './components/LegalPages';
 
 import { ArthashastraSymbol } from './components/ArthashastraSymbol';
 
-const MOCK_INTELLIGENCE = [
-  { source: 'MacroPolicy', content: 'Detected hidden inflationary pressure in regional supply chains. Decrypting policy response...', metadata: { confidence: 0.94, sector: 'Supply Chain' } },
-  { source: 'Fiscal_Analyst', content: 'Analyzing new tax amendments for potential middle-class wealth extraction patterns.', metadata: { confidence: 0.89, risk: 'High' } },
-  { source: 'Monetary_Sentinel', content: 'Monitoring central bank liquidity injections. Cross-referencing with gold reserve movements.', metadata: { confidence: 0.97, focus: 'Liquidity' } },
-  { source: 'Sector_Alpha', content: 'Unusual volume detected in semiconductor futures. Investigating institutional positioning.', metadata: { confidence: 0.91, sector: 'Tech' } }
-];
+const MOCK_INTELLIGENCE: IntelligenceItem[] = [];
 
-const MOCK_TWEETS = [
-  { tweetId: '1', author: '@EconomicTruth', text: 'The new policy is just a smoke screen for further consolidation of wealth. Watch the bond yields.', processed: true },
-  { tweetId: '2', author: '@MarketOracle', text: 'Regional banks are showing signs of liquidity stress that the main media is ignoring.', processed: false }
-];
+const MOCK_TWEETS: Tweet[] = [];
 
 export default function App() {
+  const [pathname, setPathname] = useState(window.location.pathname);
+
+  useEffect(() => {
+    const handlePopState = () => setPathname(window.location.pathname);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  if (pathname === '/privacy') return <PrivacyPage />;
+  if (pathname === '/terms') return <TermsPage />;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [language, setLanguage] = useState('en');
-  const [view, setView] = useState<'chat' | 'dashboard' | 'ledger' | 'routine'>('chat');
+  const [view, setView] = useState<'chat' | 'dashboard' | 'ledger' | 'routine' | 'brain' | 'explanation' | 'subscription'>('chat');
+  const [activeExplanation, setActiveExplanation] = useState<any>(null);
+  const [paywallReached, setPaywallReached] = useState(false);
+  const [remainingFree, setRemainingFree] = useState<number | null>(null);
+
+  const handlePayment = async () => {
+    try {
+      if (!user) return;
+      setIsLoading(true);
+
+      const token = await user.getIdToken();
+      // 1. Create Order on Server
+      const orderResp = await fetch('/api/payments/create-order', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}` 
+        },
+        body: JSON.stringify({ planId: 'absolute_witness' })
+      });
+      
+      const order = await orderResp.json();
+
+      if (!order.id) throw new Error("Order creation failed");
+
+      // 2. Open Razorpay Checkout
+      const options = {
+        key: import.meta.env.VITE_RAZORPAY_KEY_ID,
+        amount: order.amount,
+        currency: order.currency,
+        name: "Arthashastra AI",
+        description: "Absolute Witness Subscription",
+        order_id: order.id,
+        handler: function (response: any) {
+          alert(`Payment Successful: ${response.razorpay_payment_id}. Your Witness status is being synchronized.`);
+          setView('dashboard');
+        },
+        prefill: {
+          email: user.email,
+        },
+        theme: {
+          color: "#00E676"
+        }
+      };
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.open();
+    } catch (err) {
+      console.error("Payment error:", err);
+      alert("Payment initiation failed. Ensure Razorpay Keys are configured in Secrets.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
   const [isCooling, setIsCooling] = useState(false);
   const [coolingTime, setCoolingTime] = useState(0);
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -68,7 +125,7 @@ export default function App() {
   const AGENT_DOMAINS = [
     "MacroPolicy", "CorporateIntel", "RegionalIndia", "HealthPharma",
     "BankingRetail", "BankingSystemicRisk", "MarketsEquities", "MarketsDerivatives",
-    "RegionalUS", "RegionalChina", "DarkWebVetting"
+    "RegionalUS", "RegionalChina", "Cryptoeconomics", "DarkWebVetting"
   ];
 
   const agents = [
@@ -79,7 +136,8 @@ export default function App() {
     ]),
     { id: 'Compliance', role: 'Compliance', domain: 'System' },
     { id: 'TwitterMonitor', role: 'Monitor', domain: 'Social' },
-    { id: 'TwitterPoster', role: 'Poster', domain: 'Social' }
+    { id: 'TwitterPoster', role: 'Poster', domain: 'Social' },
+    { id: 'TwitterInteraction', role: 'Interaction', domain: 'Social' }
   ];
 
   // Simulation Effect - REMOVED to prevent token waste and confusion
@@ -93,6 +151,53 @@ export default function App() {
     if (!user || !isAuthReady) return;
     console.log("[System] Autonomous Fleet is active on the server (15m cycle, 24/7).");
   }, [user, isAuthReady]);
+
+  // URL Routing for Explanations
+  useEffect(() => {
+    const handleUrlRoute = async () => {
+      const path = window.location.pathname;
+      const match = path.match(/\/explanation\/([a-zA-Z0-9]+)/);
+      if (match) {
+        const id = match[1];
+        setIsLoading(true);
+        setView('explanation');
+        
+        // Wait for user to be ready
+        if (!isAuthReady) return;
+        
+        if (!user) {
+          // Requires login to track credits
+          setIsLoading(false);
+          // We can stay on 'explanation' view but show a login prompt inside it
+          return;
+        }
+
+        try {
+          const token = await user.getIdToken();
+          const resp = await fetch(`/api/gatekeeper/explanation/${id}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          const data = await resp.json();
+          
+          if (resp.status === 403 && data.code === 'PAYWALL') {
+            setPaywallReached(true);
+            setRemainingFree(0);
+          } else if (resp.ok) {
+            setActiveExplanation(data.explanation);
+            setRemainingFree(data.remainingFree);
+            setPaywallReached(false);
+          } else {
+            console.error("Failed to load explanation:", data.error);
+          }
+        } catch (err) {
+          console.error("Explanation route error:", err);
+        } finally {
+          setIsLoading(false);
+        }
+      }
+    };
+    handleUrlRoute();
+  }, [isAuthReady, user]);
 
   // Cooldown Timer
   useEffect(() => {
@@ -150,15 +255,17 @@ export default function App() {
       const isAllowed = allowedEmails.includes(u.email || "");
       
       try {
-        // Run permission check in parallel to not block the UI if possible
         const userSnap = await getDoc(doc(db, 'users', u.uid));
         const hasAdminRole = userSnap.exists() && userSnap.data().role === 'admin';
         setIsAdmin(isAllowed || hasAdminRole);
-        setIsAccessDenied(!isAllowed && !hasAdminRole);
+        
+        // For public service, we don't deny access to logged-in users.
+        // We only restrict ADMINT TOOLS.
+        setIsAccessDenied(false); 
       } catch (e) {
         console.error("[Auth] Permission check failed:", e);
         setIsAdmin(isAllowed);
-        setIsAccessDenied(!isAllowed);
+        setIsAccessDenied(false);
       }
     });
 
@@ -171,41 +278,52 @@ export default function App() {
 
   // Real-time Dashboard Data
   useEffect(() => {
-    if (!user) return;
-
+    // Public Data (Neural Brain & Archive) - No user check needed
     const qIntell = query(collection(db, 'intelligence'), orderBy('timestamp', 'desc'), limit(20));
     const unsubIntell = onSnapshot(qIntell, (snap) => {
       setIntelligence(snap.docs.map(d => ({ id: d.id, ...d.data() } as IntelligenceItem)));
     }, (error) => handleFirestoreError(error, OperationType.GET, 'intelligence'));
 
-    const qTweets = query(collection(db, 'tweets'), orderBy('timestamp', 'desc'), limit(20));
-    const unsubTweets = onSnapshot(qTweets, (snap) => {
-      setTweets(snap.docs.map(d => ({ id: d.id, ...d.data() } as Tweet)));
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'tweets'));
+    let unsubTweets = () => {};
+    let unsubLogs = () => {};
+    let unsubResp = () => {};
 
-    const qLogs = query(collection(db, 'agent_logs'), orderBy('timestamp', 'desc'), limit(50));
-    const unsubLogs = onSnapshot(qLogs, (snap) => {
-      setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() } as AgentLog)));
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'agent_logs'));
+    // Mission Operations (Twitter Handling & Logs) - ONLY for Admin
+    if (isAdmin) {
+      const qTweets = query(collection(db, 'tweets'), orderBy('timestamp', 'desc'), limit(20));
+      unsubTweets = onSnapshot(qTweets, (snap) => {
+        setTweets(snap.docs.map(d => ({ id: d.id, ...d.data() } as Tweet)));
+      }, (error) => handleFirestoreError(error, OperationType.GET, 'tweets'));
 
-    const qResp = query(collection(db, 'responses'), orderBy('timestamp', 'desc'), limit(20));
-    const unsubResp = onSnapshot(qResp, (snap) => {
-      setResponses(snap.docs.map(d => ({ id: d.id, ...d.data() } as AgentResponse)));
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'responses'));
+      const qLogs = query(collection(db, 'agent_logs'), orderBy('timestamp', 'desc'), limit(50));
+      unsubLogs = onSnapshot(qLogs, (snap) => {
+        setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() } as AgentLog)));
+      }, (error) => handleFirestoreError(error, OperationType.GET, 'agent_logs'));
 
-    const qLedger = query(collection(db, 'ledger'), orderBy('timestamp', 'desc'), limit(20));
-    const unsubLedger = onSnapshot(qLedger, (snap) => {
-      setLedger(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'ledger'));
+      const qResp = query(collection(db, 'responses'), orderBy('timestamp', 'desc'), limit(20));
+      unsubResp = onSnapshot(qResp, (snap) => {
+        setResponses(snap.docs.map(d => ({ id: d.id, ...d.data() } as AgentResponse)));
+      }, (error) => handleFirestoreError(error, OperationType.GET, 'responses'));
+
+      const qLedgerGlobal = query(collection(db, 'ledger'), orderBy('timestamp', 'desc'), limit(20));
+      const unsubLedgerGlobal = onSnapshot(qLedgerGlobal, (snap) => {
+        setLedger(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }, (error) => handleFirestoreError(error, OperationType.GET, 'ledger'));
+
+      const originalUnsubResp = unsubResp;
+      unsubResp = () => {
+        originalUnsubResp();
+        unsubLedgerGlobal();
+      };
+    }
 
     return () => {
       unsubIntell();
       unsubTweets();
       unsubLogs();
       unsubResp();
-      unsubLedger();
     };
-  }, [user]);
+  }, [isAdmin]);
 
   // Twitter Connectivity Health
   useEffect(() => {
@@ -247,7 +365,11 @@ export default function App() {
       const data = await res.json();
       if (data.error) {
         console.error(data.error);
-        alert(`Twitter Connection Failed: ${data.error}`);
+        if (data.details) {
+          alert(`Twitter Setup Required:\n\n${data.error}\n\nCallback URL: ${data.details.requiredCallbackUrl}\n\n${data.details.instructions}`);
+        } else {
+          alert(`Twitter Connection Failed: ${data.error}`);
+        }
         return;
       }
       const width = 600, height = 700;
@@ -257,6 +379,18 @@ export default function App() {
     } catch (e) {
       console.error("Failed to initiate Twitter link:", e);
       alert("Failed to connect to backend for Twitter Auth.");
+    }
+  };
+
+  const handleApproveTweet = async (tweetId: string) => {
+    try {
+      const { setDoc, doc } = await import('firebase/firestore');
+      const tweetRef = doc(db, 'tweets', tweetId);
+      await setDoc(tweetRef, { userApproved: true }, { merge: true });
+      alert("Rebuttal Approved. Arthashastra will post it on the next cycle.");
+    } catch (e) {
+      console.error("Failed to approve tweet:", e);
+      alert("Approval Failed: Authorization required.");
     }
   };
 
@@ -445,6 +579,7 @@ export default function App() {
     );
   }
 
+  // Mandatory Authentication and Identity Verification
   if (!user) {
     return (
       <div className="min-h-screen bg-void flex flex-col items-center justify-center p-34 relative overflow-hidden font-sans">
@@ -466,36 +601,43 @@ export default function App() {
           <p className="text-13 text-parchment/89 mb-34 font-sans leading-relaxed tracking-wide opacity-80 drop-shadow-[0_0_2px_rgba(230,241,255,0.3)]">
             Absolute truth is the most dangerous artifact in history. Access is restricted to designated Witnesses.
           </p>
-          <button
-            onClick={signInWithGoogle}
-            className="w-full flex items-center justify-center gap-13 bg-neon-cyan text-void py-13 px-34 rounded-13 font-bold caps-modern hover:bg-neon-cyan/89 transition-all shadow-[0_0_34px_5px_rgba(0,230,118,0.5)] hover:shadow-[0_0_55px_13px_rgba(0,230,118,0.8)]"
-          >
-            <LogIn className="w-21 h-21" />
-            Identify as Witness
-          </button>
-        </motion.div>
-      </div>
-    );
-  }
+          <div className="space-y-13">
+            <button
+              onClick={signInWithGoogle}
+              className="w-full flex items-center justify-center gap-13 bg-neon-cyan text-void py-13 px-34 rounded-13 font-bold caps-modern hover:bg-neon-cyan/89 transition-all shadow-[0_0_21px_rgba(0,230,118,0.3)] hover:shadow-[0_0_34px_rgba(0,230,118,0.5)] group"
+            >
+              <div className="p-5 bg-void/13 rounded-full group-hover:bg-void/21 transition-colors">
+                <LogIn className="w-13 h-13" />
+              </div>
+              Identity with Google
+            </button>
 
-  if (isAccessDenied) {
-    return (
-      <div className="min-h-screen bg-void flex flex-col items-center justify-center p-34 font-sans">
-        <div className="glass-panel p-55 border border-red-500/34 rounded-21 max-w-lg w-full text-center">
-          <Shield className="w-89 h-89 text-red-500 mx-auto mb-34 opacity-34" />
-          <h1 className="text-21 caps-modern text-red-500 mb-21 tracking-widest">ACCESS REPULSED</h1>
-          <p className="text-13 text-parchment/55 mb-34 leading-relaxed">
-            Your identity ({user.email}) has no authority in this sector of the witness chain.
-            This breach attempt has been logged.
-          </p>
-          <button
-            onClick={() => signOut()}
-            className="flex items-center gap-8 text-red-500/55 hover:text-red-500 mx-auto caps-modern tracking-widest transition-all"
-          >
-            <LogOut className="w-13 h-13" />
-            Disconnect Terminal
-          </button>
-        </div>
+            <div className="grid grid-cols-2 gap-13">
+              <button
+                onClick={signInWithTwitter}
+                className="flex items-center justify-center gap-8 bg-void border border-neon-cyan/34 text-neon-cyan py-13 px-13 rounded-13 font-bold caps-modern hover:bg-neon-cyan/5 transition-all text-xs group"
+              >
+                <Twitter className="w-13 h-13 group-hover:scale-110 transition-transform" />
+                X Terminal
+              </button>
+              <button
+                onClick={signInAnonymous}
+                className="flex items-center justify-center gap-8 bg-void border border-parchment/13 text-parchment/55 py-13 px-13 rounded-13 font-bold caps-modern hover:bg-parchment/5 transition-all text-xs group"
+              >
+                <Ghost className="w-13 h-13 group-hover:text-neon-magenta transition-colors" />
+                Anonymous
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-55 pt-34 border-t border-neon-cyan/8 flex flex-wrap justify-center gap-21 text-[10px] caps-modern text-parchment/34">
+            <a href="/terms" className="hover:text-neon-cyan transition-colors" onClick={(e) => { e.preventDefault(); setPathname('/terms'); window.history.pushState({}, '', '/terms'); }}>Terms & Protocols</a>
+            <span className="opacity-21">|</span>
+            <a href="/privacy" className="hover:text-neon-magenta transition-colors" onClick={(e) => { e.preventDefault(); setPathname('/privacy'); window.history.pushState({}, '', '/privacy'); }}>Privacy Isolation</a>
+            <span className="opacity-21">|</span>
+            <span className="text-void bg-neon-cyan/21 px-5 py-2">STRICT COMPLIANCE 2026</span>
+          </div>
+        </motion.div>
       </div>
     );
   }
@@ -537,9 +679,12 @@ export default function App() {
             <nav className="hidden md:flex items-center gap-13 ml-34">
               {[
                 { id: 'chat', icon: MessageSquare, label: 'Terminal' },
+                { id: 'brain', icon: Zap, label: 'Main Brain' },
                 { id: 'ledger', icon: Clock, label: 'Archive' },
-                { id: 'dashboard', icon: LayoutDashboard, label: 'Command' },
-                { id: 'routine', icon: Activity, label: 'Routine' }
+                ...(isAdmin ? [
+                  { id: 'dashboard', icon: LayoutDashboard, label: 'Command' },
+                  { id: 'routine', icon: Activity, label: 'Routine' }
+                ] : [])
               ].map((item) => (
                 <button
                   key={item.id}
@@ -548,6 +693,11 @@ export default function App() {
                     view === item.id ? 'text-neon-cyan bg-neon-cyan/13 drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]' : 'text-neon-cyan/34 hover:text-neon-cyan hover:bg-neon-cyan/5'
                   }`}
                 >
+                  {item.id === 'dashboard' && tweets.filter(t => !t.processed && !t.userApproved && t.draftRebuttal).length > 0 && (
+                    <span className="absolute -top-5 -right-5 w-13 h-13 bg-neon-magenta rounded-full flex items-center justify-center text-[8px] text-white font-bold animate-pulse shadow-[0_0_8px_#FF00FF]">
+                      {tweets.filter(t => !t.processed && !t.userApproved && t.draftRebuttal).length}
+                    </span>
+                  )}
                   <item.icon className={`w-13 h-13 ${view === item.id ? 'text-neon-cyan' : 'group-hover:text-neon-cyan'} transition-colors`} />
                   <span className="text-[10px] caps-modern font-bold tracking-widest">{item.label}</span>
                   {view === item.id && (
@@ -608,7 +758,7 @@ export default function App() {
 
       <main className="pt-89 pb-144">
         <div className="max-w-[1440px] mx-auto w-full px-21">
-          {systemStatus === 'unconfigured' && (
+          {isAdmin && systemStatus === 'unconfigured' && (
             <motion.div 
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: 'auto', opacity: 1 }}
@@ -642,7 +792,231 @@ export default function App() {
             </motion.div>
           )}
 
-          {view === 'routine' ? (
+          {view === 'brain' ? (
+            <div className="py-55 space-y-55 min-h-[calc(100vh-144px)] flex flex-col items-center">
+              <div className="text-center relative">
+                <motion.div
+                  animate={{ 
+                    scale: [1, 1.05, 1],
+                    rotate: [0, 5, -5, 0]
+                  }}
+                  transition={{ 
+                    duration: 13, 
+                    repeat: Infinity,
+                    ease: "easeInOut"
+                  }}
+                  className="relative z-10"
+                >
+                  <div className="absolute inset-0 bg-neon-cyan/21 blur-[89px] rounded-full animate-pulse" />
+                  <ArthashastraSymbol size={233} className="relative z-10 drop-shadow-[0_0_55px_rgba(0,230,118,0.8)]" />
+                </motion.div>
+                
+                <div className="mt-34 relative z-10">
+                  <h2 className="text-55 font-display font-bold text-neon-cyan uppercase tracking-tighter leading-none drop-shadow-[0_0_13px_rgba(0,230,118,1)]">ARTHASHASTRA CORE</h2>
+                  <p className="text-13 caps-modern text-neon-cyan/89 tracking-[0.55em] mt-8 animate-pulse">Spherical Economic Intelligence | Unified Neural Brain</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-21 w-full max-w-[1440px]">
+                <div className="glass-panel p-21 rounded-13 border-neon-cyan/34 col-span-1 lg:col-span-2 shadow-[0_0_21px_rgba(0,230,118,0.1)]">
+                  <h3 className="text-13 caps-modern text-neon-cyan mb-21 flex items-center gap-8 border-b border-neon-cyan/13 pb-8">
+                    <Zap className="w-13 h-13" />
+                    Unified Intelligence Stream
+                  </h3>
+                  <div className="space-y-13 overflow-y-auto silk-scroll max-h-[444px] pr-8">
+                    {intelligence.length > 0 ? intelligence.slice(0, 10).map((item, idx) => (
+                      <div key={idx} className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8 hover:border-neon-cyan/55 transition-all group">
+                        <div className="flex justify-between items-start mb-5">
+                          <span className="text-[10px] caps-modern text-neon-cyan/55 font-bold tracking-widest">{item.source}</span>
+                          <div className={`px-8 py-2 rounded text-[8px] caps-modern ${item.metadata?.severity === 'High' ? 'bg-cyber-red/13 text-cyber-red border border-cyber-red/34' : 'bg-neon-cyan/13 text-neon-cyan border border-neon-cyan/34'}`}>
+                            {item.metadata?.severity || 'Low'} IMPACT
+                          </div>
+                        </div>
+                        <p className="text-13 text-parchment/89 leading-relaxed group-hover:text-parchment transition-colors">{item.content}</p>
+                        <div className="mt-5 flex items-center justify-between">
+                          <span className="text-[9px] font-mono text-neon-cyan/34 italic">{new Date(item.timestamp).toLocaleTimeString()}</span>
+                          <span className="text-[9px] caps-modern text-neon-cyan/55 font-bold">Confidence: {item.metadata?.confidence || '100%'}</span>
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="flex flex-col items-center justify-center py-55 opacity-34 italic">
+                        <Database className="w-34 h-34 mb-13 animate-pulse" />
+                        <p className="text-13">Initializing Spherical Neural Mapping...</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-21 col-span-1 lg:col-span-2">
+                  <div className="glass-panel p-21 rounded-13 border-neon-magenta/34 shadow-[inset_0_0_21px_rgba(255,0,255,0.05)]">
+                    <h3 className="text-13 caps-modern text-neon-magenta mb-13 flex items-center gap-8 border-b border-neon-magenta/13 pb-8">
+                      <TrendingUp className="w-13 h-13" />
+                      Global State Perception
+                    </h3>
+                    <div className="p-21 bg-neon-magenta/5 border border-neon-magenta/13 rounded-8 relative overflow-hidden">
+                       <div className="absolute top-0 right-0 p-8">
+                         <Activity className="w-34 h-34 text-neon-magenta/13 animate-pulse" />
+                       </div>
+                       <p className="text-13 text-parchment/89 leading-relaxed italic relative z-10">
+                        "The Brain currently perceives multiple wealth-translocation vectors across the Asia-Pacific corridor. Corporate earnings volatility is being masked by central bank liquidity injections. The common man's purchasing power remains the critical focal point."
+                       </p>
+                    </div>
+                  </div>
+
+                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/34 shadow-[0_0_13px_rgba(0,230,118,0.1)]">
+                    <h3 className="text-13 caps-modern text-neon-cyan mb-13 flex items-center gap-8 border-b border-neon-cyan/13 pb-8">
+                      <Shield className="w-13 h-13" />
+                      Mission Security State
+                    </h3>
+                    <div className="grid grid-cols-2 gap-13">
+                      <div className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8 text-center">
+                        <p className="text-[10px] caps-modern text-neon-cyan/55 mb-5">Ledger Integrity</p>
+                        <p className="text-21 font-bold text-neon-cyan">100% SECURE</p>
+                      </div>
+                      <div className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8 text-center">
+                        <p className="text-[10px] caps-modern text-neon-cyan/55 mb-5">Agent Sync Status</p>
+                        <p className="text-21 font-bold text-neon-cyan">STABLE</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/21 bg-neon-cyan/5 shadow-[0_0_21px_rgba(0,230,118,0.05)]">
+                    <h3 className="text-13 caps-modern text-neon-cyan mb-13 flex items-center gap-8 border-b border-neon-cyan/13 pb-8">
+                      <Globe className="w-13 h-13" />
+                      Spherical Cross-Disciplinary Awareness
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-8">
+                      {[
+                        { label: 'Politics', icon: Landmark, color: 'neon-cyan' },
+                        { label: 'Technology', icon: Zap, color: 'neon-blue' },
+                        { label: 'Biology', icon: Activity, color: 'neon-magenta' },
+                        { label: 'Anthropology', icon: Globe, color: 'parchment' },
+                        { label: 'Psychology', icon: Shield, color: 'neon-blue' },
+                        { label: 'Cryptoeconomics', icon: Coins, color: 'neon-cyan' },
+                      ].map((field, idx) => (
+                        <div key={idx} className={`p-8 bg-void/34 border border-${field.color}/13 rounded-5 flex flex-col items-center gap-5 hover:border-${field.color}/55 transition-all group cursor-default shadow-[0_0_5px_rgba(0,0,0,0.2)]`}>
+                          <field.icon className={`w-13 h-13 text-${field.color} opacity-55 group-hover:opacity-100 group-hover:drop-shadow-[0_0_5px_currentColor] transition-all`} />
+                          <span className={`text-[8px] caps-modern text-${field.color}/55 group-hover:text-${field.color} transition-all`}>{field.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-13 text-[9px] text-parchment/55 leading-relaxed bg-void/21 p-8 rounded border border-neon-cyan/8">
+                      <p className="italic">"The Brain strip-searches every human discipline to reveal its hidden economic pulse. There are no isolated subjects—only nodes in the Global Wealth Organism."</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : view === 'explanation' ? (
+            <div className="py-55 max-w-3xl mx-auto space-y-34">
+              <div className="flex items-center justify-between border-b border-neon-cyan/21 pb-21">
+                <div>
+                  <h2 className="text-34 font-display font-bold text-neon-cyan uppercase tracking-tighter drop-shadow-[0_0_8px_rgba(0,230,118,0.6)]">Economic Analysis</h2>
+                  <p className="text-[10px] caps-modern text-neon-cyan/55 mt-5">Verified by Arthashastra AI | Absolute Witness Ledger</p>
+                </div>
+                {!paywallReached && remainingFree !== null && (
+                  <div className="px-13 py-8 bg-neon-cyan/5 border border-neon-cyan/34 rounded-full text-[10px] text-neon-cyan font-bold uppercase tracking-widest shadow-[0_0_8px_rgba(0,230,118,0.2)]">
+                    Free Credits: {remainingFree}
+                  </div>
+                )}
+              </div>
+
+              {!user ? (
+                <div className="glass-panel p-55 border border-neon-cyan/34 rounded-21 text-center space-y-34">
+                  <div className="mx-auto w-89 h-89 bg-neon-cyan/13 rounded-full flex items-center justify-center">
+                    <User className="w-55 h-55 text-neon-cyan drop-shadow-[0_0_10px_#00E676]" />
+                  </div>
+                  <h3 className="text-34 caps-modern font-bold text-neon-cyan">IDENTITY REQUIRED</h3>
+                  <p className="text-13 text-parchment/89 leading-relaxed">
+                    To track your 3 free absolute truth explanations, you must identify as a Witness. Connect your credentials to proceed.
+                  </p>
+                  <button 
+                    onClick={signInWithGoogle}
+                    className="w-full bg-neon-cyan text-void py-13 rounded-13 font-bold caps-modern hover:bg-neon-cyan/89 shadow-[0_0_34px_rgba(0,230,118,0.5)] transition-all"
+                  >
+                    Identify as Witness
+                  </button>
+                </div>
+              ) : paywallReached ? (
+                <div className="glass-panel p-55 border border-neon-magenta/34 bg-neon-magenta/5 rounded-21 text-center space-y-34 shadow-[0_0_55px_rgba(255,0,255,0.1)]">
+                  <div className="mx-auto w-89 h-89 bg-neon-magenta/13 rounded-full flex items-center justify-center animate-pulse">
+                    <Shield className="w-55 h-55 text-neon-magenta drop-shadow-[0_0_10px_#FF00FF]" />
+                  </div>
+                  <h3 className="text-34 caps-modern font-bold text-neon-magenta drop-shadow-[0_0_5px_rgba(255,0,255,0.8)]">CREDITS DEPLETED</h3>
+                  <p className="text-13 text-parchment/89 leading-relaxed">
+                    You have exhausted your 3 free absolute truth explanations. Access to the full neural economic engine requires a Witness Subscription.
+                  </p>
+                  <button 
+                    onClick={handlePayment}
+                    className="w-full bg-neon-magenta text-white py-13 rounded-13 font-bold caps-modern hover:bg-neon-magenta/89 shadow-[0_0_34px_rgba(255,0,255,0.5)] transition-all"
+                  >
+                    Authorize Subscription
+                  </button>
+                </div>
+              ) : activeExplanation ? (
+                <motion.div 
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="glass-panel p-34 border border-neon-cyan/13 rounded-13 space-y-21 bg-void/55 backdrop-blur-xl"
+                >
+                  <div className="prose prose-invert max-w-none text-parchment/89 prose-p:leading-relaxed prose-headings:text-neon-cyan">
+                    <ReactMarkdown>{activeExplanation.content}</ReactMarkdown>
+                  </div>
+                  <div className="pt-21 border-t border-neon-cyan/13 flex justify-between items-center text-[10px] caps-modern text-neon-cyan/55">
+                    <span>Ledger ID: {activeExplanation.id}</span>
+                    <span>Witnessed: {new Date(activeExplanation.timestamp).toLocaleString()}</span>
+                  </div>
+                </motion.div>
+              ) : (
+                <div className="py-89 text-center space-y-13 opacity-55 italic">
+                  <Database className="w-55 h-55 mx-auto animate-pulse" />
+                  <p>Searching the Aitihya Ledger...</p>
+                </div>
+              )}
+            </div>
+          ) : view === 'subscription' ? (
+            <div className="py-55 max-w-5xl mx-auto space-y-55 text-center">
+              <div className="space-y-13">
+                <h2 className="text-55 font-display font-bold text-neon-cyan uppercase tracking-tighter drop-shadow-[0_0_13px_rgba(0,230,118,0.8)]">WITNESS ACCESS</h2>
+                <p className="text-13 caps-modern text-neon-cyan/55 tracking-[0.55em]">Unlimited Economic Reality Unlocked</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-34">
+                <div className="glass-panel p-34 border border-neon-cyan/13 hover:border-neon-cyan/55 transition-all text-left space-y-21 opacity-55 grayscale cursor-not-allowed group">
+                  <h3 className="text-21 caps-modern text-neon-cyan/89">Trial Witness</h3>
+                  <div className="text-55 font-bold text-neon-cyan/55">FREE</div>
+                  <ul className="space-y-8 text-[10px] caps-modern text-parchment/55">
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13" /> 3 Explanations</li>
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13" /> Public Terminal</li>
+                    <li className="flex items-center gap-8 opacity-34"><X className="w-13 h-13" /> Unlimited Analysis</li>
+                  </ul>
+                  <div className="pt-13 text-[10px] text-neon-cyan italic">STATUS: DEPLETED</div>
+                </div>
+
+                <div className="glass-panel p-34 border border-neon-magenta/55 bg-neon-magenta/5 shadow-[0_0_34px_rgba(255,0,255,0.1)] text-left space-y-21 group relative overflow-hidden">
+                  <div className="absolute top-0 right-0 p-13 bg-neon-magenta text-white text-[10px] caps-modern font-bold shadow-[0_0_13px_#FF00FF]">PRIORITY</div>
+                  <h3 className="text-21 caps-modern text-neon-magenta">Absolute Witness</h3>
+                  <div className="text-55 font-bold text-neon-magenta drop-shadow-[0_0_5px_rgba(255,0,255,0.5)]">$34<span className="text-13">/MO</span></div>
+                  <ul className="space-y-8 text-[10px] caps-modern text-parchment/89">
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> UNLIMITED EXPLANATIONS</li>
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> PRIORITY NEURAL LINK</li>
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> AITIHYA CHAIN ACCESS</li>
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> TWITTER INTEL EXPORT</li>
+                  </ul>
+                  <button 
+                    onClick={handlePayment}
+                    className="w-full bg-neon-magenta text-white py-13 rounded-8 font-bold caps-modern hover:shadow-[0_0_21px_#FF00FF] transition-all"
+                  >
+                    ACTIVATE LINK
+                  </button>
+                  <p className="text-[8px] text-parchment/34 leading-tight mt-13 italic">
+                    * Compliance: All payments processed via Razorpay SECURE. Users subject to regional central bank KYC rules. 
+                    Mission legal review active per jurisdiction. No PII stored off-chain.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (view === 'routine' && isAdmin) ? (
             <div className="space-y-34 py-34">
               <div className="flex items-center justify-between mb-21">
                 <div>
@@ -761,71 +1135,102 @@ export default function App() {
                     <div className="flex items-center gap-13">
                       <Blocks className="w-34 h-34 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]" />
                       <div>
-                        <h2 className="text-13 caps-modern text-neon-cyan tracking-widest uppercase drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">The Ledger of Proof</h2>
-                        <p className="text-[10px] text-parchment/34 uppercase">Immutable verification of elite deception</p>
+                        <h2 className="text-13 caps-modern text-neon-cyan tracking-widest uppercase drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">{isAdmin ? 'The Ledger of Proof' : 'Your Witness Threads'}</h2>
+                        <p className="text-[10px] text-parchment/34 uppercase">{isAdmin ? 'Immutable verification of elite deception' : 'Synchronized with the Aitihya Chain'}</p>
                       </div>
                     </div>
                   </div>
 
-                  {ledger.filter(b => 
-                    !searchTerm || 
-                    b.hash?.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                    b.agentId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    String(b.data).toLowerCase().includes(searchTerm.toLowerCase())
-                  ).length === 0 ? (
-                    <div className="h-[300px] flex items-center justify-center opacity-34 italic text-neon-cyan">
-                      No blocks witnessed in the absolute truth chain.
-                    </div>
+                  {isAdmin ? (
+                    <>
+                      {ledger.filter(b => 
+                        !searchTerm || 
+                        b.hash?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        b.agentId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        String(b.data).toLowerCase().includes(searchTerm.toLowerCase())
+                      ).length === 0 ? (
+                        <div className="h-[300px] flex items-center justify-center opacity-34 italic text-neon-cyan">
+                          No blocks witnessed in the absolute truth chain.
+                        </div>
+                      ) : (
+                        ledger.filter(b => 
+                          !searchTerm || 
+                          b.hash?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                          b.agentId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          String(b.data).toLowerCase().includes(searchTerm.toLowerCase())
+                        ).map((block) => (
+                          <motion.div
+                            key={block.id}
+                            initial={{ opacity: 0, x: -20 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            className="p-21 glass-panel border border-neon-cyan/13 relative group hover:border-neon-cyan/34 hover:shadow-[0_0_15px_rgba(0,230,118,0.2)]"
+                          >
+                            <div className="absolute -left-2 top-0 bottom-0 w-3 bg-neon-cyan/34 group-hover:bg-neon-cyan group-hover:shadow-[0_0_10px_rgba(0,230,118,0.8)] transition-colors" />
+                            <div className="flex items-start justify-between mb-13 gap-13">
+                              <div className="flex items-center gap-8">
+                                <span className="text-13 font-mono text-neon-cyan bg-neon-cyan/13 px-8 py-2 border border-neon-cyan/34 tracking-tighter drop-shadow-[0_0_2px_rgba(0,230,118,0.5)]">
+                                  B-{block.index}
+                                </span>
+                                <span className="text-[10px] caps-modern text-parchment/55 truncate">
+                                  Witness: <span className="text-neon-cyan">{block.agentId}</span> | Level: {block.role}
+                                </span>
+                              </div>
+                              <span className="text-[10px] font-mono text-neon-magenta/55">
+                                {new Date(block.timestamp).toLocaleString()}
+                              </span>
+                            </div>
+                            <div className="text-13 leading-relaxed text-parchment/89 font-sans selection:bg-neon-cyan/55">
+                              {typeof block.data === 'string' ? block.data : JSON.stringify(block.data)}
+                            </div>
+                            <div className="mt-13 pt-13 border-t border-neon-cyan/8 flex items-center gap-21 text-[10px] font-mono text-parchment/34">
+                              <div className="flex items-center gap-5">
+                                <span className="text-neon-cyan">Hash:</span>
+                                <span className="truncate max-w-[100px]">{block.hash}</span>
+                              </div>
+                              <div className="flex items-center gap-5">
+                                <span className="text-neon-cyan">Prev:</span>
+                                <span className="truncate max-w-[100px]">{block.previousHash}</span>
+                              </div>
+                              <div className="ml-auto flex items-center gap-5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <Shield className="w-10 h-10 text-neon-green" />
+                                <span className="text-neon-green uppercase drop-shadow-[0_0_3px_rgba(57,255,20,0.5)]">Verified Integrity</span>
+                              </div>
+                            </div>
+                          </motion.div>
+                        ))
+                      )}
+                    </>
                   ) : (
-                    ledger.filter(b => 
-                      !searchTerm || 
-                      b.hash?.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                      b.agentId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                      String(b.data).toLowerCase().includes(searchTerm.toLowerCase())
-                    ).map((block) => (
-                      <motion.div
-                        key={block.id}
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        className="p-21 glass-panel border border-neon-cyan/13 relative group hover:border-neon-cyan/34 hover:shadow-[0_0_15px_rgba(0,230,118,0.2)]"
-                      >
-                        <div className="absolute -left-2 top-0 bottom-0 w-3 bg-neon-cyan/34 group-hover:bg-neon-cyan group-hover:shadow-[0_0_10px_rgba(0,230,118,0.8)] transition-colors" />
-                        <div className="flex items-start justify-between mb-13 gap-13">
-                          <div className="flex items-center gap-8">
-                            <span className="text-13 font-mono text-neon-cyan bg-neon-cyan/13 px-8 py-2 border border-neon-cyan/34 tracking-tighter drop-shadow-[0_0_2px_rgba(0,230,118,0.5)]">
-                              B-{block.index}
-                            </span>
-                            <span className="text-[10px] caps-modern text-parchment/55 truncate">
-                              Witness: <span className="text-neon-cyan">{block.agentId}</span> | Level: {block.role}
-                            </span>
+                    <div className="glass-panel p-34 border border-neon-cyan/13 rounded-13 text-center space-y-21">
+                      <div className="w-55 h-55 bg-neon-cyan/13 rounded-full flex items-center justify-center mx-auto">
+                        <MessageSquare className="w-34 h-34 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]" />
+                      </div>
+                      <h3 className="text-21 caps-modern text-neon-cyan">Private Archive</h3>
+                      <p className="text-13 text-parchment/55 max-w-md mx-auto">
+                        This view displays your authenticated, cryptographically signed witness threads. 
+                        Each thread is isolated and secured within the absolute witness perimeter.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-13 text-left">
+                        <div className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8">
+                          <div className="flex items-center gap-8 mb-8">
+                            <Shield className="w-13 h-13 text-neon-cyan" />
+                            <span className="text-[10px] caps-modern text-neon-cyan font-bold tracking-widest">ISOLATION-0</span>
                           </div>
-                          <span className="text-[10px] font-mono text-neon-magenta/55">
-                            {new Date(block.timestamp).toLocaleString()}
-                          </span>
+                          <p className="text-[11px] text-parchment/55 leading-relaxed">Zero-trust containment for all operative communications.</p>
                         </div>
-                        <div className="text-13 leading-relaxed text-parchment/89 font-sans selection:bg-neon-cyan/55">
-                          {typeof block.data === 'string' ? block.data : JSON.stringify(block.data)}
+                        <div className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8">
+                          <div className="flex items-center gap-8 mb-8">
+                            <Lock className="w-13 h-13 text-neon-magenta" />
+                            <span className="text-[10px] caps-modern text-neon-magenta font-bold tracking-widest">PRIVATE LEDGER</span>
+                          </div>
+                          <p className="text-[11px] text-parchment/55 leading-relaxed">Your data remains witnessed only by you and the absolute core.</p>
                         </div>
-                        <div className="mt-13 pt-13 border-t border-neon-cyan/8 flex items-center gap-21 text-[10px] font-mono text-parchment/34">
-                          <div className="flex items-center gap-5">
-                            <span className="text-neon-cyan">Hash:</span>
-                            <span className="truncate max-w-[100px]">{block.hash}</span>
-                          </div>
-                          <div className="flex items-center gap-5">
-                            <span className="text-neon-cyan">Prev:</span>
-                            <span className="truncate max-w-[100px]">{block.previousHash}</span>
-                          </div>
-                          <div className="ml-auto flex items-center gap-5 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Shield className="w-10 h-10 text-neon-green" />
-                            <span className="text-neon-green uppercase drop-shadow-[0_0_3px_rgba(57,255,20,0.5)]">Verified Integrity</span>
-                          </div>
-                        </div>
-                      </motion.div>
-                    ))
+                      </div>
+                    </div>
                   )}
                 </div>
               </div>
-            ) : view === 'dashboard' ? (
+            ) : (view === 'dashboard' && isAdmin) ? (
             <div className="space-y-34 py-34">
               <div className="flex items-center justify-between mb-21">
                 <div>
@@ -937,6 +1342,15 @@ export default function App() {
                       </div>
                     </div>
                     <div className="space-y-13 max-h-[400px] overflow-y-auto silk-scroll pr-8">
+                      {tweets.length === 0 && (
+                        <div className="py-55 text-center space-y-13 border border-dashed border-neon-cyan/13 rounded-13">
+                          <Activity className="w-34 h-34 text-neon-cyan/21 mx-auto animate-spin-slow" />
+                          <p className="text-[10px] caps-modern text-neon-cyan/34 tracking-widest">
+                            Agents are scanning for economically significant targets...<br/>
+                            Status: Awaiting first cycle (15-20s)
+                          </p>
+                        </div>
+                      )}
                       {tweets.map((tweet) => (
                         <div key={tweet.id} className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8 hover:shadow-[0_0_8px_rgba(0,230,118,0.1)] transition-all">
                           <div className="flex items-center justify-between mb-5">
@@ -944,6 +1358,36 @@ export default function App() {
                             <span className="text-[10px] text-neon-cyan/55 font-mono">{new Date(tweet.timestamp).toLocaleTimeString()}</span>
                           </div>
                           <p className="text-13 text-parchment/89 mb-8 italic">"{tweet.text}"</p>
+                          
+                          {/* Approval Flow */}
+                          {!tweet.processed && !tweet.userApproved && tweet.draftRebuttal && (
+                            <div className="mt-8 p-13 bg-neon-cyan/5 border border-neon-cyan/21 rounded-8 space-y-8 shadow-[inset_0_0_15px_rgba(0,230,118,0.05)]">
+                              <div className="flex items-center gap-5 text-[10px] text-neon-cyan font-bold uppercase">
+                                <Search className="w-13 h-13" />
+                                AI Suggested Rebuttal
+                              </div>
+                              <p className="text-12 text-parchment/89 font-mono">{tweet.draftRebuttal}</p>
+                              <div className="flex items-center gap-13 pt-5">
+                                <button 
+                                  onClick={() => handleApproveTweet(tweet.id!)}
+                                  className="flex-1 py-5 bg-neon-cyan text-void text-[10px] font-bold uppercase tracking-widest hover:bg-neon-cyan/89 transition-all shadow-[0_0_10px_rgba(0,230,118,0.3)] rounded"
+                                >
+                                  Deploy Truth Rebuttal
+                                </button>
+                                <button className="px-8 py-5 border border-cyber-red/34 text-cyber-red text-[10px] font-bold uppercase hover:bg-cyber-red/5 transition-all rounded">
+                                  Ignore
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {tweet.userApproved && !tweet.processed && (
+                            <div className="mt-8 flex items-center gap-5 p-8 bg-neon-cyan/13 border border-neon-cyan/34 rounded-8 animate-pulse text-[10px] text-neon-cyan font-bold uppercase">
+                              <Clock className="w-13 h-13" />
+                              Pending Posting Cycle...
+                            </div>
+                          )}
+
                           {(() => {
                             const response = responses.find(r => r.targetId === tweet.tweetId);
                             if (!response) return null;

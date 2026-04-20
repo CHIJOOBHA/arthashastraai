@@ -2,15 +2,17 @@
   "entities": {
     "IntelligenceItem": {
       "title": "Intelligence Item",
-      "description": "A piece of data gathered from external sources.",
+      "description": "A piece of data gathered and analyzed by the Central Brain.",
       "type": "object",
       "properties": {
-        "source": { "type": "string", "description": "The origin of the data (e.g., 'web', 'database', 'darkweb')." },
-        "content": { "type": "string", "description": "The raw or processed content of the intelligence." },
-        "timestamp": { "type": "string", "format": "date-time", "description": "When the data was collected." },
-        "metadata": { "type": "object", "description": "Additional source-specific information." }
+        "source": { "type": "string" },
+        "content": { "type": "string" },
+        "explanationId": { "type": "string", "description": "Link to the detailed breakdown." },
+        "isBroadcasted": { "type": "boolean", "description": "Flag for the Twitter execution pipe." },
+        "metadata": { "type": "object" },
+        "timestamp": { "type": "string", "format": "date-time" }
       },
-      "required": ["source", "content", "timestamp"]
+      "required": ["source", "content", "timestamp", "isBroadcasted"]
     },
     "Tweet": {
       "title": "Monitored Tweet",
@@ -56,9 +58,51 @@
       "properties": {
         "uid": { "type": "string" },
         "email": { "type": "string" },
-        "role": { "type": "string", "enum": ["admin", "user"] }
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "explanationViewCount": { "type": "number", "description": "Number of free explanations viewed." },
+        "isSubscribed": { "type": "boolean", "description": "Whether the user has an active subscription." }
       },
       "required": ["uid", "email", "role"]
+    },
+    "Explanation": {
+      "title": "Explanation",
+      "description": "A detailed economic explanation linked from a tweet.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "content": { "type": "string", "description": "The detailed economic analysis." },
+        "targetTweetId": { "type": "string", "description": "The ID of the tweet this explains." },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "content", "targetTweetId", "timestamp"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "User subscription details.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "expired", "cancelled"] },
+        "razorpaySubscriptionId": { "type": "string" },
+        "plan": { "type": "string" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "status"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Payment transaction record.",
+      "type": "object",
+      "properties": {
+        "paymentId": { "type": "string" },
+        "orderId": { "type": "string" },
+        "userId": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string" },
+        "blockchainTxId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["paymentId", "userId", "amount", "status"]
     },
     "Conversation": {
       "title": "Conversation",
@@ -74,8 +118,8 @@
       "required": ["id", "userId", "title"]
     },
     "Message": {
-      "title": "Message",
-      "description": "A single chat message within a conversation.",
+      "title": "Aitihya Witness Entry",
+      "description": "An immutable witness entry on the Aitihya Chain.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
@@ -83,11 +127,12 @@
         "text": { "type": "string" },
         "userId": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
-        "hash": { "type": "string" },
-        "previousHash": { "type": "string" },
-        "index": { "type": "number" }
+        "hash": { "type": "string", "description": "SHA-256 integrity hash." },
+        "previousHash": { "type": "string", "description": "Link to the previous witness block." },
+        "index": { "type": "number" },
+        "agentId": { "type": "string" }
       },
-      "required": ["id", "role", "text", "userId"]
+      "required": ["id", "role", "text", "userId", "hash", "index"]
     }
   },
   "firestore": {
@@ -96,6 +141,9 @@
     "/responses/{id}": { "schema": "AgentResponse", "description": "Collection of AI-generated responses." },
     "/agent_logs/{id}": { "schema": "AgentLog", "description": "Logs of agent activities." },
     "/users/{uid}": { "schema": "User", "description": "User profiles and roles." },
+    "/explanations/{id}": { "schema": "Explanation", "description": "Detailed economic explanations for tweets." },
+    "/subscriptions/{uid}": { "schema": "Subscription", "description": "User subscription records." },
+    "/payments/{id}": { "schema": "Payment", "description": "Transaction logs." },
     "/conversations/{id}": { "schema": "Conversation", "description": "Private chat block per user." },
     "/conversations/{id}/messages/{messageId}": { "schema": "Message", "description": "Ledger entries of the chat." }
   }

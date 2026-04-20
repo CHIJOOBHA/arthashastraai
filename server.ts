@@ -8,6 +8,9 @@ import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import { TwitterApi } from "twitter-api-v2";
 import { getFirestore } from "firebase-admin/firestore";
+import crypto from "crypto";
+import { getRazorpay } from "./src/lib/razorpay.js";
+import { witnessBlock } from "./src/lib/aitihya.js";
 
 // --- GLOBAL SAFETY NET ---
 process.on('unhandledRejection', (reason, promise) => {
@@ -75,30 +78,34 @@ async function startServer() {
     const { 
       macroTriad, corporateTriad, regionalIndiaTriad, healthTriad,
       bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad,
-      marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, darkWebVettingTriad,
-      runTriad, twitterMonitorAgent, twitterPosterAgent 
+      marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, cryptoeconomicTriad, darkWebVettingTriad,
+      runTriad, twitterMonitorAgent, twitterPosterAgent, twitterBroadcasterAgent, twitterInteractionAgent 
     } = await import("./src/lib/agents.js");
-    const { ai } = await import("./src/lib/gemini.js");
+    const { ai, SYSTEM_INTELLIGENCE_CORE } = await import("./src/lib/gemini.js");
 
     const serverContext = {
       ai: {
         models: {
           generateContent: async (p) => {
+            // Prepend the System Intelligence Core to every agent prompt to ensure unified brain identity
+            const fullPrompt = `${SYSTEM_INTELLIGENCE_CORE}\n\nTask-Specific Instructions: ${p.contents}`;
             const resp = await ai.models.generateContent({
               model: "gemini-3-flash-preview",
-              contents: p.contents
+              contents: [{ role: "user", parts: [{ text: fullPrompt }] }]
             });
             return { text: resp.text };
           }
         }
       },
       db,
+      appUrl: process.env.APP_URL || (projectId ? `https://${projectId}.firebaseapp.com` : ""),
+      razorpayKeyId: process.env.RAZORPAY_KEY_ID,
       logAction: async (n, a, s) => {
-        if (admin.apps.length) await db.collection("agent_logs").add({ agentName: n, action: a, status: s, timestamp: new Date().toISOString() });
+        if (admin.apps.length && db) await db.collection("agent_logs").add({ agentName: n, action: a, status: s, timestamp: new Date().toISOString() });
       }
     };
 
-    const triads = [macroTriad, corporateTriad, regionalIndiaTriad, healthTriad, bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad, marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, darkWebVettingTriad];
+    const triads = [macroTriad, corporateTriad, regionalIndiaTriad, healthTriad, bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad, marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, cryptoeconomicTriad, darkWebVettingTriad];
     
     const runCycle = async () => {
       // Gracefully abort if the provided key is a placeholder or unset to prevent log spamming
@@ -108,14 +115,25 @@ async function startServer() {
         return;
       }
       
-      console.log("[Cycle] Starting...");
-      for (const t of triads) { await runTriad(t, serverContext); await new Promise(r => setTimeout(r, 10000)); }
+      console.log("[Cycle] Starting Optimized Intelligence Run...");
+      // Stagger triad execution to spread token load
+      for (const t of triads) { 
+        await runTriad(t, serverContext); 
+        await new Promise(r => setTimeout(r, 15000 + Math.random() * 10000)); 
+      }
+      
       await twitterMonitorAgent(serverContext);
+      await new Promise(r => setTimeout(r, 5000));
       await twitterPosterAgent(serverContext);
+      await new Promise(r => setTimeout(r, 5000));
+      await twitterBroadcasterAgent(serverContext);
+      await new Promise(r => setTimeout(r, 5000));
+      await twitterInteractionAgent(serverContext);
     };
 
-    setInterval(runCycle, 15 * 60 * 1000);
-    setTimeout(runCycle, 15000);
+    // Run every 30 minutes to maximize free token quota while maintaining 'always-on' presence
+    setInterval(runCycle, 30 * 60 * 1000);
+    setTimeout(runCycle, 20000);
 
     // Chat API
     app.post("/api/chat", async (req, res) => {
@@ -138,15 +156,200 @@ async function startServer() {
       }
     });
 
+    // --- ENFORCEMENT GATEKEEPER ---
+    // Specifically for Explanation access tracking (Free: 3, then Paid)
+    // Enforces the 3-free-explanations rule ATOMICALLY on the backend.
+    app.get("/api/gatekeeper/explanation/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const authHeader = req.headers.authorization;
+        
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+          return res.status(401).json({ error: "Auth Required", code: "AUTH_REQUIRED" });
+        }
+
+        const token = authHeader.split('Bearer ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        const uid = decodedToken.uid;
+
+        if (!admin.apps.length || !db) return res.status(500).json({ error: "Database not initialized" });
+
+        const userRef = db.collection("users").doc(uid);
+        const expRef = db.collection("explanations").doc(id);
+
+        let activeExplanation: any = null;
+        let finalViewCount = 0;
+        let isSubscribed = false;
+
+        // Atomic Transaction for the 3-free-explanations rule
+        await db.runTransaction(async (transaction) => {
+          const userDoc = await transaction.get(userRef);
+          const expDoc = await transaction.get(expRef);
+
+          if (!expDoc.exists) {
+            throw new Error("EXPLANATION_NOT_FOUND");
+          }
+          activeExplanation = expDoc.data();
+
+          let userData = userDoc.exists ? userDoc.data() : { 
+            uid, 
+            email: decodedToken.email, 
+            role: 'user', 
+            explanationViewCount: 0, 
+            isSubscribed: false 
+          };
+
+          // Initialize missing fields
+          if (userData.explanationViewCount === undefined) userData.explanationViewCount = 0;
+          if (userData.isSubscribed === undefined) userData.isSubscribed = false;
+
+          isSubscribed = userData.isSubscribed;
+
+          // Check Access Permissions
+          const canAccess = userData.isSubscribed || userData.explanationViewCount < 3;
+
+          if (!canAccess) {
+            throw new Error("PAYWALL_REACHED");
+          }
+
+          // Increment count if not subscribed
+          if (!userData.isSubscribed) {
+             userData.explanationViewCount += 1;
+             transaction.set(userRef, { explanationViewCount: userData.explanationViewCount }, { merge: true });
+          }
+          finalViewCount = userData.explanationViewCount;
+        });
+
+        res.json({
+          explanation: activeExplanation,
+          remainingFree: isSubscribed ? Infinity : 3 - finalViewCount
+        });
+
+      } catch (e: any) {
+        if (e.message === "PAYWALL_REACHED") {
+          return res.status(403).json({ error: "Subscription required", code: "PAYWALL" });
+        }
+        if (e.message === "EXPLANATION_NOT_FOUND") {
+          return res.status(404).json({ error: "Explanation Not Found" });
+        }
+        console.error("[Gatekeeper Error]:", e);
+        res.status(500).json({ error: "Access validation failed" });
+      }
+    });
+
+    // --- PAYMENTS API (Razorpay) ---
+    
+    // Create Razorpay Order
+    app.post("/api/payments/create-order", async (req, res) => {
+      try {
+        const { planId } = req.body; // e.g., 'absolute_witness'
+        const authHeader = req.headers.authorization;
+        if (!authHeader) return res.status(401).send("Unauthorized");
+
+        const razorpay = getRazorpay();
+        const amount = 3400; // Rs 34.00 (in paise) per requirement
+
+        const order = await razorpay.orders.create({
+          amount,
+          currency: "INR",
+          receipt: `receipt_${Date.now()}`,
+          notes: {
+            planId,
+            identity: "Absolute Witness Access"
+          }
+        });
+
+        res.json(order);
+      } catch (e) {
+        console.error("[Razorpay Order Error]:", e);
+        res.status(500).json({ error: "Failed to create payment order" });
+      }
+    });
+
+    // Razorpay Webhook Management
+    // HMAC Signature Verification + Idempotent Processing
+    app.post("/api/payments/webhook", async (req, res) => {
+      const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+      const signature = req.headers["x-razorpay-signature"];
+
+      if (typeof signature !== 'string') return res.status(400).send("No signature field");
+
+      const shasum = crypto.createHmac("sha256", secret || "LEGACY_SECRET");
+      shasum.update(JSON.stringify(req.body));
+      const digest = shasum.digest("hex");
+
+      if (digest !== signature) {
+        return res.status(400).send("Invalid signature");
+      }
+
+      const event = req.body.event;
+      console.log(`[Razorpay Webhook] Event received: ${event}`);
+
+      if (event === "payment.captured" || event === "order.paid") {
+        const payload = req.body.payload.payment?.entity || req.body.payload.order?.entity;
+        const orderNotes = payload.notes || {};
+        const paymentId = payload.id || "manual_capture";
+        const userId = orderNotes.userId; // Important: Ensure frontend sends userId in notes
+        
+        // Record immutable audit trail to Aitihya Chain
+        const eventData = { event, paymentId, userId, amount: payload.amount, timestamp: new Date().toISOString() };
+        const signingSecret = process.env.AITIHYA_SIGNING_SECRET || "ARTHASHASTRA_ROOT";
+        const block = await witnessBlock(eventData, "PaymentsGatekeeper", "Oracle", undefined, signingSecret);
+        
+        // Record to Firestore and update user status atomically
+        if (db && userId) {
+          const batch = db.batch();
+          const paymentRef = db.collection("payments").doc(paymentId);
+          const userRef = db.collection("users").doc(userId);
+          const subRef = db.collection("subscriptions").doc(userId);
+
+          batch.set(paymentRef, {
+            ...eventData,
+            blockchainTxId: block.hash,
+            status: "confirmed"
+          });
+
+          batch.update(userRef, { 
+            isSubscribed: true, 
+            updatedAt: new Date().toISOString() 
+          });
+
+          batch.set(subRef, {
+            userId,
+            status: "active",
+            plan: orderNotes.planId || "absolute_witness",
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
+            paymentId
+          });
+
+          await batch.commit();
+          console.log(`[Subscription] Witnessed and activated for user ${userId}`);
+        }
+
+        console.log(`[Blockchain] Witnessed payment ${paymentId} with hash ${block.hash}`);
+      }
+
+      res.json({ status: "ok" });
+    });
+
     // Twitter OAuth Routes
     app.get("/api/auth/twitter/url", async (req, res) => {
       try {
         const clientId = process.env.TWITTER_CLIENT_ID;
         const clientSecret = process.env.TWITTER_CLIENT_SECRET;
-        const appUrl = process.env.APP_URL;
+        // Fallback to host header if APP_URL is not set
+        const appUrl = process.env.APP_URL || (req.headers.host ? `https://${req.headers.host}` : "");
 
         if (!clientId || !clientSecret || !appUrl) {
-          return res.status(400).json({ error: "Twitter OAuth variables (TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET, APP_URL) are not set in the environment/secrets." });
+          const suggestedUrl = appUrl || "YOUR_APP_URL";
+          return res.status(400).json({ 
+            error: "Twitter OAuth variables (TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET) are not set in the environment/secrets.",
+            details: {
+              info: "You must set these in the Secrets panel in AI Studio.",
+              requiredCallbackUrl: `${suggestedUrl}/api/auth/twitter/callback`,
+              instructions: "1. Go to Twitter Developer Portal. 2. Create an OAuth 2.0 app. 3. Set the Type to 'Web App'. 4. Add the callback URL above. 5. Copy Client ID and Secret to AI Studio Secrets."
+            }
+          });
         }
 
         const client = new TwitterApi({ clientId, clientSecret });
@@ -179,7 +382,7 @@ async function startServer() {
 
         const clientId = process.env.TWITTER_CLIENT_ID;
         const clientSecret = process.env.TWITTER_CLIENT_SECRET;
-        const appUrl = process.env.APP_URL;
+        const appUrl = process.env.APP_URL || (req.headers.host ? `https://${req.headers.host}` : "");
         
         const client = new TwitterApi({ clientId, clientSecret });
 
