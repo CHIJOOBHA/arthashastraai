@@ -133,10 +133,119 @@
         "agentId": { "type": "string" }
       },
       "required": ["id", "role", "text", "userId", "hash", "index"]
+    },
+    "Debate": {
+      "title": "Public Debate",
+      "description": "A public argument or question posed to the Absolute Witness.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userArgument": { "type": "string" },
+        "aiResponse": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "likesCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "resolved"] },
+        "topic": { "type": "string" }
+      },
+      "required": ["id", "userId", "userName", "userArgument", "createdAt", "status"]
+    },
+    "ArenaChatMessage": {
+      "title": "Arena Chat Message",
+      "description": "An interactive follow-up chat message associated with a public debate argument.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "model"] },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "role", "text", "createdAt"]
+    },
+    "Chronicle": {
+      "title": "Arthashastra Chronicle",
+      "description": "Daily summary of systemic economic truth, articles, and trending rebuttals.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "YYYY-MM-DD identifier." },
+        "date": { "type": "string" },
+        "tweets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "region": { "type": "string" }
+            }
+          }
+        },
+        "articleIndia": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "content": { "type": "string" },
+            "summary": { "type": "string" }
+          }
+        },
+        "articleWorld": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "content": { "type": "string" },
+            "summary": { "type": "string" }
+          }
+        },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "date", "tweets", "articleIndia", "articleWorld", "timestamp"]
+    },
+    "ThreatMatrix": {
+      "title": "Threat Matrix",
+      "description": "Predictive economic threat intelligence report.",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "agentReportsUsed": { "type": "boolean" }
+      },
+      "required": ["content", "timestamp"]
+    },
+    "LedgerEntry": {
+      "title": "Ledger Entry",
+      "description": "An entry in the immutable Aitihya Chain ledger.",
+      "type": "object",
+      "properties": {
+        "index": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "data": { "type": "object" },
+        "previousHash": { "type": "string" },
+        "hash": { "type": "string" },
+        "agentId": { "type": "string" },
+        "role": { "type": "string" },
+        "signature": { "type": "string" },
+        "task_id": { "type": "string" },
+        "metadata": { "type": "object" }
+      },
+      "required": ["index", "timestamp", "data", "previousHash", "hash", "agentId", "role"]
+    },
+    "SharedTranscript": {
+      "title": "Shared Transcript",
+      "description": "A shared chat history block.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "messages": { "type": "string", "description": "JSON string of messages." },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "messages", "createdAt"]
     }
   },
   "firestore": {
     "/intelligence/{id}": { "schema": "IntelligenceItem", "description": "Collection of gathered intelligence." },
+    "/config/{id}": { "schema": "object", "description": "System configuration and tokens." },
     "/tweets/{id}": { "schema": "Tweet", "description": "Collection of monitored tweets." },
     "/responses/{id}": { "schema": "AgentResponse", "description": "Collection of AI-generated responses." },
     "/agent_logs/{id}": { "schema": "AgentLog", "description": "Logs of agent activities." },
@@ -145,6 +254,14 @@
     "/subscriptions/{uid}": { "schema": "Subscription", "description": "User subscription records." },
     "/payments/{id}": { "schema": "Payment", "description": "Transaction logs." },
     "/conversations/{id}": { "schema": "Conversation", "description": "Private chat block per user." },
-    "/conversations/{id}/messages/{messageId}": { "schema": "Message", "description": "Ledger entries of the chat." }
+    "/conversations/{id}/messages/{messageId}": { "schema": "Message", "description": "Ledger entries of the chat." },
+    "/debates/{id}": { "schema": "Debate", "description": "Public arguments and questions posed to the AI." },
+    "/debates/{id}/chat/{msgId}": { "schema": "ArenaChatMessage", "description": "Interactive chat discussion on a debate topic." },
+    "/chronicles/{id}": { "schema": "Chronicle", "description": "Daily repository of truth and analysis." },
+    "/cold_archives/{id}": { "schema": "object", "description": "Compressed conversation archives." },
+    "/audit_log/{id}": { "schema": "AgentLog", "description": "Tamper-evident logs of system actions." },
+    "/threat_matrices/{id}": { "schema": "ThreatMatrix", "description": "Daily or triggered threat analysis reports." },
+    "/ledger/{id}": { "schema": "LedgerEntry", "description": "Global Aithiya Chain ledger tracking system actions." },
+    "/shared_transcripts/{id}": { "schema": "SharedTranscript", "description": "Publicly shared chat transcripts." }
   }
 }

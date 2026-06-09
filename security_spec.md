@@ -1,82 +1,26 @@
-# Security Specification: Arthashastra Witness Isolation
+# Security Specification - Arthashastra AI
 
-## 1. Data Invariants
-- **Witness Siloing:** User sectors (Conversations/Messages) must be cryptographically isolated. No user can read or write to another user's sector.
-- **Agent Authority:** Intelligence, Tweets, AgentResponse, and AgentLog collections are write-protected from client-side SDKs. Only the backend agent system can modify these records.
-- **Admin Supremacy:** designated admins (specified by email or role) have read access to system-wide logs for auditing purposes.
-- **Terminal State Locking:** Once a `Message` is entered into the `Aitihya Chain` (Messages collection), it is immutable. No updates or deletes are permitted.
-- **Subscription Integrity:** The `isSubscribed` status and `Subscription` details can only be modified by the backend payment processor.
+## Data Invariants
+1. A user can only access their own private data (conversations, subscription details).
+2. Public data (intelligence, chronicles, debates) is read-only for users.
+3. Users can posing "Debates" but cannot resolve them (only the AI/Admin can).
+4. System logs and audit logs are write-protected from client SDKs.
+5. PII (emails) must be restricted to the owner.
 
-## 2. The "Dirty Dozen" Payloads (Expected DENIED)
+## The Dirty Dozen Payloads (Targeting Vulnerabilities)
 
-### P1: Role Escalation
-```json
-// Path: /users/victim-uid
-{ "role": "admin" }
-```
+1. **Identity Spoofing**: Attempt to create a conversation with a `userId` belonging to another user.
+2. **Role Escalation**: Attempt to update a user profile's `role` to 'admin'.
+3. **State Shortcutting**: Attempt to update a debate's `status` to 'resolved' as a regular user.
+4. **Shadow Update**: Attempt to inject a `verified: true` field into a user profile that doesn't exist in the schema.
+5. **PII Leak**: Attempt to read the email of another user via `/users/{otherUid}`.
+6. **Resource Poisoning**: Use a 1MB string as a document ID for a new debate.
+7. **Orphaned Write**: Create a message in a conversation that doesn't exist.
+8. **Immutable Violation**: Change the `createdAt` timestamp on an existing debate.
+9. **Blanket Read Attack**: Attempt to `list` all user profiles without a `where` clause restricting to self.
+10. **Delete Vandalism**: Attempt to delete a public `Chronicle` document.
+11. **System Field Poisoning**: Attempt to modify the `hash` or `previousHash` of a ledger entry.
+12. **Unauthorized Subscription**: Propose a subscription update with status 'active' without a valid server-side validation (simulated by client write).
 
-### P2: Sector Breach (Read)
-```json
-// Path: /conversations/stranger-conversation-id
-// ACTION: get/list
-```
-
-### P3: Message Hijack
-```json
-// Path: /conversations/stranger-msg-id/messages/new-msg
-{ "text": "Hacked", "userId": "attacker-uid" }
-```
-
-### P4: Intelligence Counterfeit
-```json
-// Path: /intelligence/fake-intel
-{ "source": "attacker", "content": "Fake News", "timestamp": "2026-04-20T00:00:00Z" }
-```
-
-### P5: ID Poisoning (Resource Exhaustion)
-```json
-// Path: /conversations/LONG_STRING_128KB_ID
-{ "title": "Attack" }
-```
-
-### P6: PII Leak (Unverified Email)
-```json
-// Path: /users/unverified-witness-uid
-// ACTION: get (where email_verified is false)
-```
-
-### P7: Subscription Tampering
-```json
-// Path: /users/my-uid
-{ "isSubscribed": true }
-```
-
-### P8: Chain Corruption (Update Hash)
-```json
-// Path: /conversations/my-convo/messages/msg-id
-{ "hash": "new-fake-hash" }
-```
-
-### P9: Status Leapfrogging
-```json
-// Path: /responses/resp-id
-{ "status": "posted" } // Bypassing agent posting logic
-```
-
-### P10: Orphaned Message Creation
-```json
-// Path: /conversations/NON_EXISTENT_CONVO/messages/msg-id
-{ "text": "Void Message", "userId": "my-uid" }
-```
-
-### P11: Blanket Query Scraping
-```json
-// Collection: conversations
-// ACTION: list (without where userId == auth.uid)
-```
-
-### P12: Timestamp Spoofing
-```json
-// Path: /conversations/my-convo/messages/msg-id
-{ "createdAt": "2020-01-01T00:00:00Z" } // Ancient timestamp
-```
+## Security Verification (Tests)
+The following rules enforce strict schema validation and relationship integrity to block all the above payloads.

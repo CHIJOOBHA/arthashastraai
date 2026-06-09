@@ -1,6 +1,8 @@
 {
-  "name": "Arthashastra-AI",
+  "name": "Remix: Arthashastra-AI",
   "description": "A world-class expert in global economics and institutional intelligence, featuring autonomous agents for real-time data collection, Twitter monitoring, and AI-driven engagement.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

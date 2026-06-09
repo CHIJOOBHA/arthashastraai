@@ -3,22 +3,23 @@ service cloud.firestore {
   match /databases/{database}/documents {
     
     // ==========================================
-    // DEFAULT DENY CATCH-ALL
+    // PILLAR 0: DEFAULT DENY CATCH-ALL
     // ==========================================
     match /{document=**} {
       allow read, write: if false;
     }
 
     // ==========================================
-    // GLOBAL HELPERS
+    // PILLAR 3: GLOBAL HELPERS & ID HARDENING
     // ==========================================
     function isSignedIn() { return request.auth != null; }
     function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
     function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
-    
-    // AD-HOC ADMINS: Hardcoded for bootstrap, but usually checked via /admins/ collection
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // PILLAR 4: TIERED IDENTITY (ADMIN SUPREMACY)
     function isAdmin() { 
-      return isSignedIn() && isVerified() && (
+      return isSignedIn() && (
         request.auth.token.email == "jhansidharmana222@gmail.com" || 
         request.auth.token.email == "chitti.bhargav3@gmail.com" ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
@@ -27,10 +28,9 @@ service cloud.firestore {
 
     function incoming() { return request.resource.data; }
     function existing() { return resource.data; }
-    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
 
     // ==========================================
-    // ENTITY VALIDATORS
+    // PILLAR 2: VALIDATION BLUEPRINTS
     // ==========================================
     
     function isValidUser(data) {
@@ -44,7 +44,7 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'role', 'text', 'userId']) &&
              data.id is string && data.id.size() <= 128 &&
              data.role in ['user', 'model'] &&
-             data.text is string && data.text.size() <= 5000 &&
+             data.text is string && data.text.size() <= 10000 &&
              data.userId == request.auth.uid;
     }
 
@@ -55,51 +55,134 @@ service cloud.firestore {
              data.title is string && data.title.size() <= 200;
     }
 
+    function isValidDebate(data) {
+      return data.keys().hasAll(['id', 'userId', 'userName', 'userArgument', 'status', 'createdAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.userName is string && data.userName.size() <= 200 &&
+             data.userArgument is string && data.userArgument.size() <= 10000 &&
+             data.status in ['pending', 'resolved'];
+    }
+
+    function isValidSharedTranscript(data) {
+      return data.keys().hasAll(['id', 'userId', 'messages', 'createdAt']) &&
+             data.id is string &&
+             data.userId == request.auth.uid &&
+             data.messages is string &&
+             data.messages.size() <= 1048576; // Max 1MB
+    }
+
+    function isValidThreatMatrix(data) {
+      return data.keys().hasAll(['content', 'timestamp']) &&
+             data.content is string && data.content.size() <= 100000;
+    }
+
+    function isValidLedgerEntry(data) {
+      return data.keys().hasAll(['index', 'timestamp', 'data', 'previousHash', 'hash', 'agentId', 'role']) &&
+             data.index is int &&
+             data.previousHash is string &&
+             data.hash is string &&
+             data.agentId is string &&
+             data.role is string;
+    }
+
     // ==========================================
-    // COLLECTION RULES
+    // PILLAR 6: PII ISOLATION & COLLECTION RULES
     // ==========================================
 
-    // PUBLIC READ-ONLY
+    match /shared_transcripts/{id} {
+      allow get: if isValidId(id);
+      allow list: if false;
+      allow create: if isSignedIn() && isValidSharedTranscript(incoming()) && isValidId(id);
+      allow update, delete: if isAdmin();
+    }
+
     match /intelligence/{id} {
       allow get: if isValidId(id);
       allow list: if true;
-      allow write: if false; // System only
+      allow create: if isSignedIn(); // Agents run on client side sometimes
+      allow update, delete: if isAdmin();
     }
 
     match /explanations/{id} {
       allow get: if isValidId(id);
-      allow list: if true;
-      allow write: if false; // System only
+      allow list: if true; 
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
     }
 
-    // ADMIN ONLY (AUDIT LOGS)
+    match /config/{id} {
+      allow read, write: if isAdmin();
+    }
+
     match /agent_logs/{id} {
       allow read: if isAdmin();
-      allow write: if false;
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
     }
 
     match /tweets/{id} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow get: if isValidId(id);
+      allow list: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if isAdmin();
     }
 
     match /responses/{id} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow get: if isValidId(id);
+      allow list: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    match /ledger/{id} {
+      allow get: if isValidId(id);
+      allow list: if true;
+      allow create: if isSignedIn() && isValidLedgerEntry(incoming());
+      allow update, delete: if isAdmin();
+    }
+
+    match /chronicles/{id} {
+      allow get: if isSignedIn() && isValidId(id);
+      allow list: if isSignedIn();
+      allow create, update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /debates/{id} {
+      allow get: if isValidId(id);
+      allow list: if true; 
+      allow create: if isSignedIn() &&
+                      isValidDebate(incoming()) &&
+                      incoming().createdAt == request.time &&
+                      isValidId(id);
+                      
+      allow update: if isSignedIn() && (
+        (isOwner(existing().userId) && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['aiResponse', 'status']) &&
+         incoming().status == 'resolved') ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /threat_matrices/{id} {
+      allow get: if isValidId(id);
+      allow list: if true;
+      allow create: if isSignedIn() && isValidThreatMatrix(incoming());
+      allow update, delete: if isAdmin();
     }
 
     match /payments/{id} {
       allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
       allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow write: if false; // Only via backend
+      allow write: if false; 
     }
 
-    // USER PROFILES
     match /users/{uid} {
       allow get: if isOwner(uid) || isAdmin();
       allow list: if isAdmin();
       
-      // Strict update: users cannot change their own roles
       allow update: if (isOwner(uid) && 
                       isValidUser(incoming()) && 
                       incoming().role == existing().role &&
@@ -108,32 +191,46 @@ service cloud.firestore {
       
       allow create: if isOwner(uid) && 
                       isValidUser(incoming()) && 
-                      incoming().role == 'user'; // Default to user
+                      incoming().role == 'user';
     }
 
     match /subscriptions/{uid} {
       allow get: if isOwner(uid) || isAdmin();
       allow list: if isAdmin();
-      allow write: if isAdmin(); // Only backend
+      allow write: if isAdmin();
     }
 
-    // CHAT SECTORS (THE WITNESS LEDGER)
     match /conversations/{id} {
       allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
       allow create: if isSignedIn() && isValidConversation(incoming()) && isValidId(id);
-      allow update: if isSignedIn() && isOwner(existing().userId) && 
-                      incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageAt', 'updatedAt', 'title']);
-      allow delete: if false;
+      
+      allow update: if isSignedIn() && (
+        (isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageAt', 'updatedAt', 'title'])) ||
+        isAdmin()
+      );
+      
+      allow delete: if isAdmin();
 
       match /messages/{messageId} {
-        // Master Gate: Check parent conversation ownership
         function parentOwned() {
-          return get(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid;
+          let parentDoc = getAfter(/databases/$(database)/documents/conversations/$(id));
+          return parentDoc != null && parentDoc.data.userId == request.auth.uid;
+        }
+
+        function parentExists() {
+          return existsAfter(/databases/$(database)/documents/conversations/$(id));
         }
 
         allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-        allow create: if isSignedIn() && isValidMessage(incoming()) && parentOwned() && isValidId(messageId);
-        allow update, delete: if false; // Immutable Chain
+        
+        allow create: if isSignedIn() && 
+                        isValidMessage(incoming()) && 
+                        parentExists() &&
+                        parentOwned() && 
+                        isValidId(messageId) &&
+                        incoming().createdAt == request.time;
+        
+        allow update, delete: if isAdmin(); 
       }
     }
   }

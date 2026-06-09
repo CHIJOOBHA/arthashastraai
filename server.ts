@@ -1,12 +1,13 @@
+// --- MISSION LOCK: ARTHASHASTRA ARCHITECTURE SECURED ---
+// THIS FILE IS PART OF THE IMMORTAL CORE. NO MODIFICATION WITHOUT OVERRIDE.
+
 import express from "express";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
 import admin from "firebase-admin";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
-import { TwitterApi } from "twitter-api-v2";
 import { getFirestore } from "firebase-admin/firestore";
 import crypto from "crypto";
 import { getRazorpay } from "./src/lib/razorpay.js";
@@ -22,15 +23,15 @@ process.on('uncaughtException', (err) => {
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// We use process.cwd() instead of __dirname to support both TSX (ESM) and CJS builds
+const rootDir = process.cwd();
 
 console.log("[Server] INITIALIZING ARTHASHASTRA...");
 
 // 1. Manual Config Load
-let firebaseConfig = {};
+let firebaseConfig: any = {};
 try {
-  const cfgPath = path.resolve(__dirname, "firebase-applet-config.json");
+  const cfgPath = path.resolve(rootDir, "firebase-applet-config.json");
   if (fs.existsSync(cfgPath)) {
     firebaseConfig = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   }
@@ -38,40 +39,395 @@ try {
   console.error("[Server] Config Read Error:", e);
 }
 
-const isPlaceholder = (val) => !val || ["MY_FIREBASE_PROJECT_ID", "YOUR_API_KEY", "TODO"].some(p => String(val).includes(p));
-
-const getVal = (envK, cfgK) => {
-  const ev = process.env[envK];
-  if (!isPlaceholder(ev)) return ev;
-  const cv = firebaseConfig[cfgK];
-  if (!isPlaceholder(cv)) return cv;
-  return null;
+// --- DATABASE: THE ROOT LEDGER ---
+const isPlaceholder = (val: any) => {
+  if (!val || typeof val !== 'string') return true;
+  const p = val.trim();
+  return [
+    "MY_FIREBASE_PROJECT_ID", 
+    "YOUR_API_KEY", 
+    "TODO", 
+    "YOUR_PROJECT_ID",
+    "AIza_FAKE",
+    "YOUR_DATABASE_ID",
+    "REPLACE_WITH"
+  ].some(placeholder => p.includes(placeholder)) || p.length < 4;
 };
 
-const projectId = getVal("VITE_FIREBASE_PROJECT_ID", "projectId");
-const dbId = getVal("FIREBASE_DATABASE_ID", "firestoreDatabaseId") || getVal("VITE_FIREBASE_DATABASE_ID", "firestoreDatabaseId");
+let db: any = null;
+let isCycling = false;
+let finalProjectId = "";
+let finalDatabaseId = "";
+let lastFirestoreError = "";
+let configProjectId = "";
+let configDatabaseId = "";
+let projectCandidates: (string | undefined)[] = [];
+let databaseCandidates: string[] = [];
+let trialErrors: string[] = [];
 
-let db = null;
-if (projectId && !admin.apps.length) {
-  admin.initializeApp({ projectId });
-  db = getFirestore(dbId && dbId !== "(default)" ? dbId : undefined);
-} else if (admin.apps.length) {
-  db = getFirestore(dbId && dbId !== "(default)" ? dbId : undefined);
+// --- FIREBASE CLIENT SDK COMPATIBILITY ADAPTER ---
+// Emulates the Node.js Admin SDK firestore API on top of the Firebase Client SDK.
+const fRefs: any = {};
+
+class ClientDocumentSnapshot {
+  constructor(private snap: any) {}
+  get exists() { return this.snap.exists(); }
+  get id() { return this.snap.id; }
+  data() { return this.snap.data(); }
 }
+
+class ClientDocumentReference {
+  constructor(private clientDb: any, private col: string, private docId?: string) {}
+  get id() { return this.docId || ""; }
+  get nativeRef() {
+    return fRefs.doc(this.clientDb, this.col, this.docId!);
+  }
+  async get() {
+    const snap = await fRefs.getDoc(this.nativeRef);
+    return new ClientDocumentSnapshot(snap);
+  }
+  async set(data: any, options?: any) {
+    await fRefs.setDoc(this.nativeRef, data, options);
+  }
+  async update(data: any) {
+    await fRefs.updateDoc(this.nativeRef, data);
+  }
+}
+
+class ClientQuery {
+  constructor(private clientDb: any, private col: string, private constraints: any[]) {}
+  limit(n: number) {
+    return new ClientQuery(this.clientDb, this.col, [...this.constraints, { type: 'limit', val: n }]);
+  }
+  async get() {
+    let q = fRefs.collection(this.clientDb, this.col);
+    for (const c of this.constraints) {
+      if (c.type === 'limit') {
+        q = fRefs.query(q, fRefs.limit(c.val));
+      }
+    }
+    const snap = await fRefs.getDocs(q);
+    return {
+      empty: snap.empty,
+      docs: snap.docs.map((d: any) => new ClientDocumentSnapshot(d))
+    };
+  }
+}
+
+class ClientCollectionReference {
+  constructor(private clientDb: any, private colName: string) {}
+  doc(docId?: string) {
+    return new ClientDocumentReference(this.clientDb, this.colName, docId);
+  }
+  async add(data: any) {
+    const ref = await fRefs.addDoc(fRefs.collection(this.clientDb, this.colName), data);
+    return new ClientDocumentReference(this.clientDb, this.colName, ref.id);
+  }
+  limit(n: number) {
+    return new ClientQuery(this.clientDb, this.colName, [{ type: 'limit', val: n }]);
+  }
+}
+
+class ClientWriteBatch {
+  private batchInstance: any;
+  constructor(clientDb: any) {
+    this.batchInstance = fRefs.writeBatch(clientDb);
+  }
+  set(docRef: ClientDocumentReference, data: any, options?: any) {
+    this.batchInstance.set(docRef.nativeRef, data, options);
+  }
+  async commit() {
+    await this.batchInstance.commit();
+  }
+}
+
+class ClientTransaction {
+  constructor(private nativeTx: any, private clientDb: any) {}
+  get(docRef: ClientDocumentReference) {
+    return this.nativeTx.get(docRef.nativeRef).then((snap: any) => new ClientDocumentSnapshot(snap));
+  }
+  set(docRef: ClientDocumentReference, data: any, options?: any) {
+    this.nativeTx.set(docRef.nativeRef, data, options);
+    return this;
+  }
+  update(docRef: ClientDocumentReference, data: any) {
+    this.nativeTx.update(docRef.nativeRef, data);
+    return this;
+  }
+}
+
+class ClientFirestoreAdapter {
+  constructor(public clientDb: any) {}
+  collection(colName: string) {
+    return new ClientCollectionReference(this.clientDb, colName);
+  }
+  batch() {
+    return new ClientWriteBatch(this.clientDb);
+  }
+  async runTransaction(updateFn: (transaction: any) => Promise<any>) {
+    return await fRefs.runTransaction(this.clientDb, async (nativeTx: any) => {
+      const wrapped = new ClientTransaction(nativeTx, this.clientDb);
+      return await updateFn(wrapped);
+    });
+  }
+}
+
+async function initializeFirestore() {
+  // 1. Resolve potential IDs
+  configProjectId = (firebaseConfig.projectId && !isPlaceholder(firebaseConfig.projectId)) ? firebaseConfig.projectId : "";
+  configDatabaseId = (firebaseConfig.firestoreDatabaseId && !isPlaceholder(firebaseConfig.firestoreDatabaseId)) ? firebaseConfig.firestoreDatabaseId : "";
+  
+  const envProjectId = (process.env.VITE_FIREBASE_PROJECT_ID && !isPlaceholder(process.env.VITE_FIREBASE_PROJECT_ID))
+    ? process.env.VITE_FIREBASE_PROJECT_ID
+    : (process.env.GOOGLE_CLOUD_PROJECT || process.env.PROJECT_ID || "");
+    
+  const envDatabaseId = (process.env.VITE_FIREBASE_DATABASE_ID && !isPlaceholder(process.env.VITE_FIREBASE_DATABASE_ID))
+    ? process.env.VITE_FIREBASE_DATABASE_ID
+    : "";
+
+  projectCandidates = [
+    configProjectId,
+    envProjectId,
+    undefined // ADC fallback
+  ].filter((v, i, a) => {
+     if (v === undefined) return a.indexOf(undefined) === i;
+     if (v === "") return false;
+     return a.indexOf(v) === i;
+  }); 
+
+  databaseCandidates = [
+    configDatabaseId,
+    envDatabaseId,
+    "(default)" 
+  ].filter(v => v && v !== "" && !isPlaceholder(v)).filter((v, i, a) => a.indexOf(v) === i);
+
+  console.log(`[Server] Connection Strategy: Projects=[${projectCandidates.map(p => p || 'ADC').join(', ')}], DBs=[${databaseCandidates.join(', ')}]`);
+
+  // Try to use Client SDK as a last-resort fallback if Service Account is missing
+  let clientDb: any = null;
+  const sa = process.env.FIREBASE_SERVICE_ACCOUNT;
+  const hasSA = sa && !isPlaceholder(sa);
+  
+  if (!hasSA && configProjectId && firebaseConfig.apiKey && !isPlaceholder(firebaseConfig.apiKey)) {
+    console.log("[Server] No Service Account provided. Falling back to Firebase Client SDK for Server.");
+    try {
+      const { initializeApp } = await import("firebase/app");
+      const { getFirestore } = await import("firebase/firestore");
+      // Prevent multiple initialization warnings
+      let clientApp;
+      try {
+        clientApp = initializeApp(firebaseConfig, "server-client-app");
+      } catch (e: any) {
+        if (e.code === 'app/duplicate-app') {
+           const { getApp } = await import("firebase/app");
+           clientApp = getApp("server-client-app");
+        } else throw e;
+      }
+      
+      const targetDbId = databaseCandidates[0] === '(default)' ? undefined : databaseCandidates[0];
+      clientDb = getFirestore(clientApp, targetDbId);
+      
+      // Test read to see if security rules allow us to use the client SDK globally
+      console.log(`[Server] Testing Client SDK read for ${configProjectId}:${targetDbId || '(default)'}`);
+      const firestoreModule = await import("firebase/firestore");
+      Object.assign(fRefs, firestoreModule);
+
+      const testSnap = await fRefs.getDocs(fRefs.query(fRefs.collection(clientDb, '_health_'), fRefs.limit(1)));
+      
+      // If we got here, client DB works! We won't have full admin rights, but we can operate.
+      db = new ClientFirestoreAdapter(clientDb);
+      finalProjectId = configProjectId;
+      finalDatabaseId = targetDbId || "(default)";
+      console.log(`[Server] VERIFIED CONNECTION via Client SDK Wrapper: Project=${finalProjectId}, DB=${finalDatabaseId}`);
+      lastFirestoreError = "";
+      return; 
+    } catch (e: any) {
+      console.warn(`[Server] Client SDK Fallback Failed: ${e.message}`);
+      trialErrors.push(`Client SDK -> ${e.message}`);
+    }
+  }
+
+  const initAdmin = (projectId: string | undefined) => {
+    const apps = [...admin.apps];
+    for (const app of apps) {
+      try {
+        if (app) app.delete();
+      } catch (e) {
+        console.warn("[Server] App Delete Error:", e);
+      }
+    }
+
+    try {
+      if (hasSA) {
+        admin.initializeApp({
+          credential: admin.credential.cert(JSON.parse(sa)),
+          projectId: projectId || undefined
+        });
+      } else if (projectId) {
+        admin.initializeApp({ projectId });
+      } else {
+        admin.initializeApp();
+      }
+      console.log(`[Server] Admin Initialized for Project: ${admin.app().options.projectId || 'ADC'}`);
+    } catch (err) {
+      console.error("[Server] Admin Init Failed:", err);
+    }
+  };
+
+  const attemptBind = async (p: string | undefined, d: string): Promise<{score: number, db: any}> => {
+    try {
+      initAdmin(p);
+      const dbTarget = (d === "(default)" || d === "default" || !d) ? undefined : d;
+      const testDb = dbTarget ? getFirestore(admin.app(), dbTarget) : getFirestore(admin.app());
+      
+      const snap = await testDb.collection('_health_').doc('heartbeat').get();
+      
+      let score = 1; 
+      try {
+        const intelSnap = await testDb.collection('intelligence').limit(5).get();
+        if (!intelSnap.empty) score += 10;
+        
+        const chatSnap = await testDb.collection('conversations').limit(5).get();
+        if (!chatSnap.empty) score += 8;
+      } catch (e) {}
+      
+      return { score, db: testDb };
+    } catch (err: any) {
+      lastFirestoreError = `${err.code || 'ERROR'}: ${err.message}`;
+      console.warn(`[Server] Trial Failed: Project=${p || 'ADC'}, DB=${d} -> ${lastFirestoreError}`);
+      return { score: 0, db: null };
+    }
+  };
+
+  let bestCandidate: {score: number, db: any, p: string | undefined, d: string, error?: string} = { score: 0, db: null, p: undefined, d: "" };
+
+  for (const p of projectCandidates) {
+    for (const d of databaseCandidates) {
+      const result = await attemptBind(p, d);
+      if (result.score > bestCandidate.score) {
+        bestCandidate = { ...result, p, d };
+      }
+      if (result.score === 0) {
+        trialErrors.push(`${p || 'ADC'}:${d} -> ${lastFirestoreError}`);
+      }
+      if (result.score > 5) break;
+    }
+    if (bestCandidate.score > 5) break;
+  }
+
+  if (bestCandidate.db) {
+    db = bestCandidate.db;
+    finalProjectId = admin.app().options.projectId || bestCandidate.p || process.env.GOOGLE_CLOUD_PROJECT || "ADC";
+    finalDatabaseId = bestCandidate.d || "(default)";
+    console.log(`[Server] VERIFIED CONNECTION: Project=${finalProjectId}, DB=${finalDatabaseId} (Score: ${bestCandidate.score})`);
+    lastFirestoreError = "";
+  } else {
+    lastFirestoreError = trialErrors.length > 0 ? trialErrors[0] : "All connection trials failed";
+    console.error(`[Server] FATAL: All Firestore trials failed. Errors: ${trialErrors.join(' | ')}`);
+  }
+}
+
+// Make app accessible globally for Vercel
+let configuredApp: any;
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  configuredApp = app;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
   app.use(express.json());
   app.use(cookieParser());
 
   // Immediate Port Binding
-  const httpServer = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Server] Port ${PORT} secured.`);
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`[Server] Port ${PORT} secured.`);
+    });
+  }
+
+  // Asynchronously initialize Firestore to prevent boot blockage
+  initializeFirestore().catch((err) => {
+    console.error("[Server] Firestore background initialization error:", err);
   });
 
-  // Basic Routes
-  app.get("/api/health", (req, res) => res.json({ status: "ok", projectId }));
+    // Enhanced Routes
+    app.get("/api/health", async (req, res) => {
+      const { getEnv } = await import("./src/lib/env.js");
+      
+      const geminiKey = process.env.USER_GEMINI_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.API_KEY;
+      const isGeminiConfigured = geminiKey && 
+                                !geminiKey.includes("AIza_FAKE") && 
+                                geminiKey !== "MY_GEMINI_API_KEY" && 
+                                geminiKey.length > 3;
+
+      // Detect all missing or placeholder keys
+      const missingKeys = [];
+      const criticalKeys = [];
+
+      if (!isGeminiConfigured) {
+        // Only mark as missing if NO key is found at all
+        if (!geminiKey) {
+          missingKeys.push("GEMINI_API_KEY");
+          criticalKeys.push("GEMINI_API_KEY");
+        }
+      }
+      
+      const hasFirebase = !!db;
+      if (!hasFirebase) {
+        let firebaseLabel = "FIREBASE_DATABASE";
+        if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+           firebaseLabel = "FIREBASE_SERVICE_ACCOUNT_MISSING";
+        } else if (lastFirestoreError) {
+          if (lastFirestoreError.includes("PERMISSION_DENIED")) {
+            firebaseLabel += " (Permission Denied)";
+          } else if (lastFirestoreError.includes("NOT_FOUND")) {
+            firebaseLabel += " (Not Found)";
+          } else {
+            firebaseLabel += ` (${lastFirestoreError})`;
+          }
+        }
+        missingKeys.push(firebaseLabel);
+        
+        // Database is warning only, so frontend can continue functioning
+        // criticalKeys.push("FIREBASE_LEDGER");
+      }
+
+      console.log(`[Health Check] Gemini:${isGeminiConfigured}, Firebase:${hasFirebase}, Criticals:${criticalKeys.length}`);
+
+      const hasAitihya = process.env.AITIHYA_SIGNING_SECRET && !isPlaceholder(process.env.AITIHYA_SIGNING_SECRET);
+      if (!hasAitihya) {
+        // We allow it to be missing, but it's a warning
+        // missingKeys.push("AITIHYA_SIGNING_SECRET");
+      }
+      
+      // System is only "Unconfigured" if CRITICAL keys are missing
+      let finalStatus: 'active' | 'warn' | 'unconfigured' = "active";
+      if (criticalKeys.length > 0) {
+        finalStatus = "unconfigured";
+      } else if (missingKeys.length > 0) {
+        finalStatus = "warn";
+      }
+
+      res.json({ 
+        status: finalStatus, 
+        projectId: finalProjectId,
+        databaseId: finalDatabaseId,
+        geminiConfigured: isGeminiConfigured,
+        firestoreReady: !!db,
+        missingKeys,
+        error: finalStatus !== 'active' ? `System ${finalStatus}. Missing: ${missingKeys.join(", ")}` : null,
+        debug: {
+          lastError: lastFirestoreError,
+          envProject: process.env.GOOGLE_CLOUD_PROJECT || "unset",
+          configProject: configProjectId || "unset",
+          hasSA: !!(process.env.FIREBASE_SERVICE_ACCOUNT && process.env.FIREBASE_SERVICE_ACCOUNT !== ""),
+          candidates: {
+            projects: projectCandidates.map(p => p || 'ADC'),
+            databases: databaseCandidates
+          },
+          trialErrors: trialErrors
+        }
+      });
+    });
 
   // Dynamic Logic Load
   try {
@@ -79,80 +435,218 @@ async function startServer() {
       macroTriad, corporateTriad, regionalIndiaTriad, healthTriad,
       bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad,
       marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, cryptoeconomicTriad, darkWebVettingTriad,
-      runTriad, twitterMonitorAgent, twitterPosterAgent, twitterBroadcasterAgent, twitterInteractionAgent 
+      runTriad
     } = await import("./src/lib/agents.js");
-    const { ai, SYSTEM_INTELLIGENCE_CORE } = await import("./src/lib/gemini.js");
+    const { historicalIntelligenceTriad } = await import("./src/lib/historicalIntelligence.js");
+    const { ai, SYSTEM_INTELLIGENCE_CORE, SYSTEM_INTELLIGENCE_CORE_WITH_TWEET, DEFAULT_MODEL, HIGH_INTEL_MODEL } = await import("./src/lib/gemini.server.js");
 
     const serverContext = {
       ai: {
+        safeCall: async (model: string, contents: any, config?: any) => {
+          // Prepend the System Intelligence Core to every agent prompt to ensure unified brain identity
+          const systemContext = config?.systemInstruction || SYSTEM_INTELLIGENCE_CORE;
+          return await ai.safeCall(model, contents, {
+            ...config,
+            systemInstruction: systemContext
+          });
+        },
         models: {
-          generateContent: async (p) => {
-            // Prepend the System Intelligence Core to every agent prompt to ensure unified brain identity
+          generateContent: async (p: any) => {
+            // Mapping for legacy calls, use safeCall internally
             const fullPrompt = `${SYSTEM_INTELLIGENCE_CORE}\n\nTask-Specific Instructions: ${p.contents}`;
-            const resp = await ai.models.generateContent({
-              model: "gemini-3-flash-preview",
-              contents: [{ role: "user", parts: [{ text: fullPrompt }] }]
-            });
-            return { text: resp.text };
+            return await ai.safeCall(DEFAULT_MODEL, fullPrompt);
           }
         }
       },
       db,
-      appUrl: process.env.APP_URL || (projectId ? `https://${projectId}.firebaseapp.com` : ""),
+      appUrl: process.env.APP_URL || (finalProjectId ? `https://${finalProjectId}.firebaseapp.com` : ""),
       razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-      logAction: async (n, a, s) => {
-        if (admin.apps.length && db) await db.collection("agent_logs").add({ agentName: n, action: a, status: s, timestamp: new Date().toISOString() });
+      logAction: async (n: string, a: string, s: string) => {
+        if (admin.apps.length && db) {
+          try {
+            await db.collection("agent_logs").add({ 
+              agentName: n, 
+              action: a, 
+              status: s, 
+              timestamp: new Date().toISOString() 
+            });
+          } catch (e) {
+            console.error("[LogAction] Failed to write to agent_logs:", e);
+          }
+        }
       }
     };
 
-    const triads = [macroTriad, corporateTriad, regionalIndiaTriad, healthTriad, bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad, marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, cryptoeconomicTriad, darkWebVettingTriad];
+    const triads = [macroTriad, corporateTriad, regionalIndiaTriad, healthTriad, bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad, marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, cryptoeconomicTriad, darkWebVettingTriad, historicalIntelligenceTriad];
     
-    const runCycle = async () => {
-      // Gracefully abort if the provided key is a placeholder or unset to prevent log spamming
-      const key = process.env.GEMINI_API_KEY;
-      if (!key || key === "MY_GEMINI_API_KEY" || key.includes("AIza_FAKE")) {
-        console.warn("[Agent Cycle] Paused: GEMINI_API_KEY is missing or set to a placeholder. Set a valid key in Secrets to resume background cycles.");
+    const seedIntelligence = async () => {
+      if (!db) {
+        console.warn("[Server] Seeding skipped: Firestore not initialized.");
         return;
       }
-      
-      console.log("[Cycle] Starting Optimized Intelligence Run...");
-      // Stagger triad execution to spread token load
-      for (const t of triads) { 
-        await runTriad(t, serverContext); 
-        await new Promise(r => setTimeout(r, 15000 + Math.random() * 10000)); 
+      try {
+        console.log(`[Server] Seeding check on intelligence collection... (Project: ${finalProjectId})`);
+        const snap = await db.collection('intelligence').limit(1).get();
+        if (snap.empty) {
+          console.log("[Server] Seeding initial intelligence node...");
+          await db.collection('intelligence').add({
+            source: 'Arthashastra Root',
+            content: 'Neural Assembly Synchronized. Awaiting global telemetry. Absolute Witness is active and monitoring all economic translocation vectors.',
+            timestamp: new Date().toISOString(),
+            metadata: { severity: 'Low', confidence: '100%', category: 'System' }
+          });
+          console.log("[Server] Seeding successful.");
+        } else {
+          console.log("[Server] Database already seeded.");
+        }
+      } catch (err) {
+        console.error("[Server] Seeding failed:", err);
+        if (err instanceof Error && err.message.includes("PERMISSION_DENIED")) {
+          console.error("[Server] Critical: Firestore Permissions Denied. Check project/database configuration.");
+        }
       }
-      
-      await twitterMonitorAgent(serverContext);
-      await new Promise(r => setTimeout(r, 5000));
-      await twitterPosterAgent(serverContext);
-      await new Promise(r => setTimeout(r, 5000));
-      await twitterBroadcasterAgent(serverContext);
-      await new Promise(r => setTimeout(r, 5000));
-      await twitterInteractionAgent(serverContext);
     };
 
-    // Run every 30 minutes to maximize free token quota while maintaining 'always-on' presence
-    setInterval(runCycle, 30 * 60 * 1000);
-    setTimeout(runCycle, 20000);
+    const runCycle = async () => {
+      if (isCycling) {
+        console.warn("[Server] runCycle is already in progress, skipping...");
+        return;
+      }
+      isCycling = true;
+      try {
+        // Seed first
+        await seedIntelligence();
+        // Gracefully resolve key and abort if it is a placeholder or unset to prevent log spamming
+        const rawKey = process.env.USER_GEMINI_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.API_KEY;
+        const key = (rawKey && rawKey !== "MY_GEMINI_API_KEY" && rawKey !== "YOUR_API_KEY" && !rawKey.includes("FAKE")) ? rawKey : "";
+        if (!key || key === "") {
+          console.warn("[Agent Cycle] Paused: GEMINI_API_KEY is missing or set to a placeholder. Set a valid key in Secrets (or USER_GEMINI_KEY if reserved) to resume background cycles.");
+          return;
+        }
+
+        if (!db) {
+          console.warn("[Agent Cycle] Paused: Firestore database not connected.");
+          return;
+        }
+        
+        console.log("[Cycle] Starting Optimized Intelligence Run...");
+        const isPremium = process.env.GEMINI_KEY_TIER === "professional" || (key && key.length > 40);
+        
+        if (isPremium) {
+          console.log("[Cycle] Premium account. Running all 13 intelligence triads...");
+          for (const t of triads) { 
+            await runTriad(t, serverContext); 
+            const stagger = 60000 + Math.random() * 30000; // 60-90s stagger
+            await new Promise(r => setTimeout(r, stagger)); 
+          }
+        } else {
+          console.log("[Cycle] Free tier account. Selecting 1 random intelligence triad to conserve daily API key limits for user chats...");
+          const randomTriad = triads[Math.floor(Math.random() * triads.length)];
+          await runTriad(randomTriad, serverContext);
+        }
+        console.log("[Cycle] Completed Intelligence Run.");
+      } catch (e: any) {
+        console.error("[Cycle] Execution error:", e);
+      } finally {
+        isCycling = false;
+      }
+    };
+
+    setInterval(runCycle, 120 * 60 * 1000);
+    // Delay initial cycle to 5 minutes to prevent competition with user during dev/remix boot
+    setTimeout(runCycle, 300000); 
+
+    // Vercel Cron Endpoint
+    app.get("/api/cron/run-cycle", async (req, res) => {
+      const authHeader = req.headers['authorization'];
+      const cronSecret = process.env.CRON_SECRET;
+      
+      // Security Check
+      if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      console.log("[Cron] Triggering Intelligence Cycle via External Request...");
+      
+      // On Serverless (Vercel), we must acknowledge that background tasks 
+      // may be throttled after response. We run it and hope for the best, 
+      // or the user should use a persistent Cloud Run instance.
+      runCycle().catch(err => console.error("[Cron] Path Error:", err));
+      
+      res.json({ 
+        status: "intelligence_cycle_triggered", 
+        timestamp: new Date().toISOString(),
+        message: "Cycle initiated in background. Monitor Agent logs for progress."
+      });
+    });
 
     // Chat API
     app.post("/api/chat", async (req, res) => {
       try {
-        const { history, message, language } = req.body;
-        const stream = await ai.models.generateContentStream({
-          model: "gemini-3-flash-preview",
-          contents: [...history, { role: "user", parts: [{ text: message }] }],
-          config: { systemInstruction: `Respond in ${language}.` }
+        const { history, message, language, context } = req.body;
+        
+        // Inject intelligence into the system context
+        const intelligenceContext = context?.intelligence && context.intelligence.length > 0
+          ? `\n\n[LATEST INTELLIGENCE STREAM]:\n${context.intelligence.slice(0, 5).map((i: any) => `- ${i.source}: ${i.content}`).join('\n')}`
+          : "";
+
+        const fullContents = [
+          ...history,
+          { role: "user", parts: [{ text: `[Language: ${language}]${intelligenceContext}\n\nUser Question: ${message}` }] }
+        ];
+
+        const stream = await ai.safeCall(HIGH_INTEL_MODEL, fullContents, {
+          stream: true,
+          systemInstruction: SYSTEM_INTELLIGENCE_CORE_WITH_TWEET
         });
+
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        for await (const c of stream) {
-           if (c.text) res.write(c.text);
+        for await (const chunk of stream) {
+          if (chunk.text) res.write(chunk.text);
         }
         res.end();
       } catch (e: any) { 
         console.error("[Chat API Error]:", e);
-        const code = e.message?.includes('CONFIGURATION_REQUIRED') ? 401 : 500;
-        res.status(code).send(e.message || "Internal Server Error"); 
+        const errStr = String(e);
+        if (errStr.includes('429') || errStr.includes('RESOURCE_EXHAUSTED')) {
+          res.status(429).send("RESOURCE_EXHAUSTED");
+        } else if (errStr.includes('CONFIGURATION_REQUIRED')) {
+          res.status(401).send("CONFIGURATION_REQUIRED");
+        } else {
+          res.status(500).send(e.message || "Internal Server Error");
+        }
+      }
+    });
+
+    app.post("/api/chat/json", async (req, res) => {
+      try {
+        const { generateJSON } = await import("./src/lib/gemini.server.js");
+        const { prompt, systemInstruction } = req.body;
+        const result = await generateJSON(prompt, systemInstruction);
+        res.json(result);
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    app.post("/api/chat/arena", async (req, res) => {
+      try {
+        const { generateArenaResponse } = await import("./src/lib/gemini.server.js");
+        const { argument, language } = req.body;
+        const result = await generateArenaResponse(argument, language);
+        res.send(result);
+      } catch (e: any) {
+        res.status(500).send(e.message);
+      }
+    });
+
+    app.post("/api/chat/call", async (req, res) => {
+      try {
+        const { modelName, contents, config } = req.body;
+        const result = await ai.safeCall(modelName || DEFAULT_MODEL, contents, config);
+        res.json(result);
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
       }
     });
 
@@ -260,9 +754,12 @@ async function startServer() {
         });
 
         res.json(order);
-      } catch (e) {
+      } catch (e: any) {
         console.error("[Razorpay Order Error]:", e);
-        res.status(500).json({ error: "Failed to create payment order" });
+        const errorMsg = e.message?.includes('missing from environment') 
+          ? "Payment gateway unconfigured. Set VITE_RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Settings -> Secrets." 
+          : "Failed to create payment order";
+        res.status(500).json({ error: errorMsg });
       }
     });
 
@@ -292,9 +789,9 @@ async function startServer() {
         const userId = orderNotes.userId; // Important: Ensure frontend sends userId in notes
         
         // Record immutable audit trail to Aitihya Chain
-        const eventData = { event, paymentId, userId, amount: payload.amount, timestamp: new Date().toISOString() };
-        const signingSecret = process.env.AITIHYA_SIGNING_SECRET || "ARTHASHASTRA_ROOT";
-        const block = await witnessBlock(eventData, "PaymentsGatekeeper", "Oracle", undefined, signingSecret);
+    const signingSecret = process.env.AITIHYA_SIGNING_SECRET || "ARTHASHASTRA_ROOT_FAILSAFE_SIGNED";
+    const eventData = { event, paymentId, userId, amount: payload.amount, timestamp: new Date().toISOString() };
+    const block = await witnessBlock(eventData, "PaymentsGatekeeper", "Oracle", undefined, signingSecret);
         
         // Record to Firestore and update user status atomically
         if (db && userId) {
@@ -332,114 +829,67 @@ async function startServer() {
       res.json({ status: "ok" });
     });
 
-    // Twitter OAuth Routes
-    app.get("/api/auth/twitter/url", async (req, res) => {
-      try {
-        const clientId = process.env.TWITTER_CLIENT_ID;
-        const clientSecret = process.env.TWITTER_CLIENT_SECRET;
-        // Fallback to host header if APP_URL is not set
-        const appUrl = process.env.APP_URL || (req.headers.host ? `https://${req.headers.host}` : "");
+    // --- DIAGNOSTICS & OAUTH ---
+    app.get("/api/diagnostics", (req, res) => {
+      const mask = (v: string | undefined) => {
+        if (!v || v.length < 8) return v === undefined ? "missing" : "placeholder/invalid";
+        return `${v.substring(0, 4)}...${v.substring(v.length - 4)}`;
+      };
 
-        if (!clientId || !clientSecret || !appUrl) {
-          const suggestedUrl = appUrl || "YOUR_APP_URL";
-          return res.status(400).json({ 
-            error: "Twitter OAuth variables (TWITTER_CLIENT_ID, TWITTER_CLIENT_SECRET) are not set in the environment/secrets.",
-            details: {
-              info: "You must set these in the Secrets panel in AI Studio.",
-              requiredCallbackUrl: `${suggestedUrl}/api/auth/twitter/callback`,
-              instructions: "1. Go to Twitter Developer Portal. 2. Create an OAuth 2.0 app. 3. Set the Type to 'Web App'. 4. Add the callback URL above. 5. Copy Client ID and Secret to AI Studio Secrets."
-            }
-          });
+      const geminiKey = process.env.USER_GEMINI_KEY || process.env.GEMINI_API_KEY;
+      const isGeminiConfigured = geminiKey && !geminiKey.includes("AIza_FAKE") && geminiKey !== "MY_GEMINI_API_KEY" && geminiKey.length > 10;
+      const hasFirebase = !isPlaceholder(process.env.VITE_FIREBASE_PROJECT_ID) || !isPlaceholder(firebaseConfig["projectId"]);
+      
+      res.json({
+        gemini: {
+          primary: mask(process.env.GEMINI_API_KEY),
+          fallback: mask(process.env.USER_GEMINI_KEY),
+          configured: !!isGeminiConfigured
+        },
+        firebase: {
+          projectId: finalProjectId,
+          managedProject: firebaseConfig.projectId,
+          databaseId: finalDatabaseId,
+          configured: !!db,
+          identity: {
+            finalProject: finalProjectId,
+            finalDatabase: finalDatabaseId,
+            envProject: !!process.env.VITE_FIREBASE_PROJECT_ID,
+            hasSA: !!process.env.FIREBASE_SERVICE_ACCOUNT
+          }
+        },
+        env: process.env.NODE_ENV,
+        neuralDump: {
+          hasGemini: isGeminiConfigured,
+          hasFirebase: !!db
         }
-
-        const client = new TwitterApi({ clientId, clientSecret });
-        // Generate auth link, requiring offline access to get a refresh token
-        const { url, codeVerifier, state } = client.generateOAuth2AuthLink(
-          `${appUrl}/api/auth/twitter/callback`,
-          { scope: ['tweet.read', 'tweet.write', 'users.read', 'offline.access'] }
-        );
-
-        // Store verifier and state in cookies for the callback to use
-        res.cookie('twitter_verifier', codeVerifier, { httpOnly: true, secure: true, maxAge: 1000 * 60 * 15 });
-        res.cookie('twitter_state', state, { httpOnly: true, secure: true, maxAge: 1000 * 60 * 15 });
-
-        res.json({ url });
-      } catch (e) {
-        console.error("Twitter Auth URL Error:", e);
-        res.status(500).json({ error: "Failed to generate Twitter auth URL" });
-      }
+      });
     });
 
-    app.get("/api/auth/twitter/callback", async (req, res) => {
-      try {
-        const { state, code } = req.query;
-        const storedState = req.cookies.twitter_state;
-        const codeVerifier = req.cookies.twitter_verifier;
-
-        if (state !== storedState || !codeVerifier || typeof code !== 'string') {
-          return res.status(400).send("Invalid OAuth state or verifier. Please close this window and try again.");
-        }
-
-        const clientId = process.env.TWITTER_CLIENT_ID;
-        const clientSecret = process.env.TWITTER_CLIENT_SECRET;
-        const appUrl = process.env.APP_URL || (req.headers.host ? `https://${req.headers.host}` : "");
-        
-        const client = new TwitterApi({ clientId, clientSecret });
-
-        const { accessToken, refreshToken, expiresIn } = await client.loginWithOAuth2({
-          code,
-          codeVerifier,
-          redirectUri: `${appUrl}/api/auth/twitter/callback`
-        });
-
-        // Store the tokens in Firestore so the agents can use them
-        if (admin.apps.length && db) {
-          await db.collection("config").doc("twitter").set({
-            accessToken,
-            refreshToken,
-            expiresAt: Date.now() + (expiresIn * 1000),
-            updatedAt: Date.now()
-          }, { merge: true });
-        } else {
-          console.warn("Firestore not available to save Twitter token. Will only persist in memory/env temporarily.");
-        }
-
-        // Return an HTML page that sends a message to the opener, then closes itself
-        res.send(`
-          <html>
-            <head><title>Twitter Auth Successful</title></head>
-            <body>
-              <p>Twitter connected successfully! You may close this window.</p>
-              <script>
-                if (window.opener) {
-                  window.opener.postMessage({ type: 'TWITTER_AUTH_SUCCESS' }, '*');
-                  window.close();
-                } else {
-                  console.log("No opener window found.");
-                }
-              </script>
-            </body>
-          </html>
-        `);
-      } catch (e) {
-        console.error("Twitter OAuth Callback Error:", e);
-        res.status(500).send("Authentication failed. Check the server logs.");
-      }
-    });
-
-  } catch (err) {
-    console.error("[Server] Logic Load Fail:", err);
-  }
-
-  // Vite
-  if (process.env.NODE_ENV !== "production") {
+    // Vite
+    if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
-    const dist = path.resolve(__dirname, "dist");
+    const dist = path.resolve(rootDir, "dist");
     app.use(express.static(dist));
     app.get("*", (req, res) => res.sendFile(path.join(dist, "index.html")));
   }
+
+  // Export the app for Vercel
+  return app;
+  } catch (e: any) {
+    console.error("[Server Critical Error]:", e);
+    const fallbackApp = express();
+    fallbackApp.get("*", (req, res) => res.status(500).send("Neural Critical Failure: Server Initialization Failed."));
+    return fallbackApp;
+  }
 }
 
-startServer();
+const appPromise = startServer();
+
+export default async function handler(req: any, res: any) {
+  const app = await appPromise;
+  app(req, res);
+}

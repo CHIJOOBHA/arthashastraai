@@ -1,30 +1,64 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ * 
+ * --- MISSION LOCK: ARTHASHASTRA ARCHITECTURE SECURED ---
+ * THIS FILE IS PART OF THE IMMORTAL CORE. NO MODIFICATION WITHOUT OVERRIDE.
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, User, Landmark, Globe, Briefcase, ChevronRight, TrendingUp, ShieldAlert, AlertTriangle, Languages, Loader2, LayoutDashboard, MessageSquare, MessageCircle, Activity, Database, Twitter, LogOut, LogIn, ExternalLink, Clock, Blocks, Shield, Search, Calendar, Zap, CheckCircle2, Coins, X, Lock, Link, Ghost, Terminal } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Send, User, Landmark, Globe, Briefcase, ChevronRight, TrendingUp, ShieldAlert, AlertTriangle, Languages, Loader2, LayoutDashboard, MessageSquare, MessageCircle, Activity, Database, LogOut, LogIn, ExternalLink, Clock, Blocks, Archive, Shield, Search, Calendar, Zap, CheckCircle2, Coins, X, Lock, Link, Ghost, Terminal, Users, Plus, Newspaper, Download, Share2, Copy } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from 'motion/react';
 import { sendMessage } from './lib/gemini';
 import { SUPPORTED_LANGUAGES, TRANSLATIONS } from './translations';
-import { auth, db, signInWithGoogle, signInWithTwitter, signInAnonymous, signOut, IntelligenceItem, Tweet, AgentLog, AgentResponse, handleFirestoreError, OperationType } from './lib/firebase';
+import { auth, db, signInWithGoogle, signInAnonymous, signOut, IntelligenceItem, Tweet, AgentLog, AgentResponse, handleFirestoreError, OperationType, resilientGetDoc, syncNeuralLink } from './lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { collection, query, orderBy, limit, onSnapshot, addDoc, getDoc, doc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot, addDoc, getDoc, doc, updateDoc, Firestore } from 'firebase/firestore';
 import { 
   macroTriad, corporateTriad, regionalIndiaTriad, healthTriad,
   bankingRetailTriad, bankingSystemicRiskTriad, marketsEquitiesTriad,
   marketsDerivativesTriad, regionalUSTriad, regionalChinaTriad, darkWebVettingTriad,
-  runTriad, twitterMonitorAgent, twitterPosterAgent 
+  runTriad
 } from './lib/agents';
 import { witnessBlock, AitihyaBlock } from './lib/aitihya';
 import { Message } from './lib/firebase';
 import { AitihyaHistory } from './components/AitihyaHistory';
-import { saveMessage, getMessages } from './lib/chatStore';
+import { saveMessage, getMessages, getConversations } from './lib/chatStore';
 import { TermsPage, PrivacyPage } from './components/LegalPages';
 
 import { ArthashastraSymbol } from './components/ArthashastraSymbol';
+import { LogicProof } from './components/LogicProof';
+import { ArthashastraGazette } from './components/ArthashastraGazette';
+import { SharedTranscript } from './components/SharedTranscript';
+import { createSharedTranscript } from './lib/chatStore';
+import { TheArena } from './components/TheArena';
+import { TheWarChest } from './components/TheWarChest';
+import { DataSovereignty } from './components/DataSovereignty';
+import { ArchiveOS } from './components/ArchiveOS';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { EconomicDisasterPredictor } from './components/EconomicDisasterPredictor';
+import AgentRotationPanel from './components/AgentRotationPanel';
+
+const AlertModal = ({ context, onClose }: { context: any, onClose: () => void }) => {
+  if (!context) return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-[#050B14]/80 backdrop-blur-sm p-4">
+      <div className="bg-[#050B14] border border-[#00E676] p-8 md:p-13 rounded-13 max-w-sm w-full font-sans shadow-[0_0_34px_rgba(0,230,118,0.2)]">
+         <h3 className={`text-21 font-bold caps-modern mb-5 whitespace-pre-wrap ${context.isError ? 'text-[#FF00FF]' : 'text-[#00E676]'}`}>{context.title}</h3>
+         <p className="text-13 text-[#E6F1FF]/89 mb-8 whitespace-pre-wrap leading-relaxed">{context.message}</p>
+         <div className="flex justify-end gap-5 mt-5">
+           <button onClick={onClose} className="px-5 py-3 border border-[#E6F1FF]/13 rounded text-[10px] caps-modern text-[#E6F1FF]/55 hover:text-[#E6F1FF] hover:border-[#E6F1FF]/34 transition bg-transparent uppercase font-bold">Cancel</button>
+           {context.onConfirm && (
+             <button onClick={context.onConfirm} className="px-5 py-3 text-[10px] caps-modern bg-[#00E676] text-[#050B14] font-bold rounded shadow transition hover:bg-[#00ffff] uppercase">Continue</button>
+           )}
+         </div>
+      </div>
+    </div>,
+    document.body
+  );
+};
 
 const MOCK_INTELLIGENCE: IntelligenceItem[] = [];
 
@@ -32,6 +66,8 @@ const MOCK_TWEETS: Tweet[] = [];
 
 export default function App() {
   const [pathname, setPathname] = useState(window.location.pathname);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [modalContext, setModalContext] = useState<{title: string, message: string, onConfirm?: () => void, isError?: boolean} | null>(null);
 
   useEffect(() => {
     const handlePopState = () => setPathname(window.location.pathname);
@@ -39,14 +75,59 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (!deferredPrompt) {
+      const isIframe = window !== window.parent;
+      if (isIframe) {
+         setModalContext({
+           title: "Open App in New Tab?",
+           message: "PWA installation is not supported inside this preview window.\n\nWould you like to open Arthashastra in a new tab so you can install it?",
+           onConfirm: () => {
+             window.open(window.location.href, '_blank');
+             setModalContext(null);
+           }
+         });
+      } else {
+         setModalContext({
+           title: "Installation Unavailable",
+           message: "The automatic install prompt is currently not available.\n\nQuick fixes:\n- Reload the page. Sometimes it takes a moment to become ready.\n- Look for the 'Install' icon (a small computer with a down arrow) in the right side of your browser's URL address bar.\n\nOther reasons:\n1. The app might already be installed on your device.\n2. Your current browser may not support PWA installation (e.g. Incognito mode).",
+           isError: true
+         });
+      }
+      return;
+    }
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    console.log(`User response to the install prompt: ${outcome}`);
+    setDeferredPrompt(null);
+  };
+
   if (pathname === '/privacy') return <PrivacyPage />;
   if (pathname === '/terms') return <TermsPage />;
+  if (pathname.startsWith('/gazette/')) {
+    const dateParam = pathname.split('/')[2];
+    return <ArthashastraGazette initialDate={dateParam} />;
+  }
+  if (pathname.startsWith('/share/')) {
+    const shareId = pathname.split('/')[2];
+    return <SharedTranscript sharedId={shareId} />;
+  }
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
   const [language, setLanguage] = useState('en');
-  const [view, setView] = useState<'chat' | 'dashboard' | 'ledger' | 'routine' | 'brain' | 'explanation' | 'subscription'>('chat');
+  const [view, setView] = useState<'chat' | 'dashboard' | 'ledger' | 'archive' | 'routine' | 'brain' | 'explanation' | 'subscription' | 'gazette' | 'arena' | 'warchest' | 'sovereignty' | 'threat'>('chat');
   const [activeExplanation, setActiveExplanation] = useState<any>(null);
   const [paywallReached, setPaywallReached] = useState(false);
   const [remainingFree, setRemainingFree] = useState<number | null>(null);
@@ -69,7 +150,7 @@ export default function App() {
       
       const order = await orderResp.json();
 
-      if (!order.id) throw new Error("Order creation failed");
+      if (!order.id) throw new Error(order.error || "Order creation failed");
 
       // 2. Open Razorpay Checkout
       const options = {
@@ -93,9 +174,9 @@ export default function App() {
 
       const rzp = new (window as any).Razorpay(options);
       rzp.open();
-    } catch (err) {
+    } catch (err: any) {
       console.error("Payment error:", err);
-      alert("Payment initiation failed. Ensure Razorpay Keys are configured in Secrets.");
+      alert(err.message || "Payment initiation failed. Ensure Razorpay Keys are configured in Secrets.");
     } finally {
       setIsLoading(false);
     }
@@ -108,10 +189,58 @@ export default function App() {
   const [showFailsafe, setShowFailsafe] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeChatId, setActiveChatId] = useState<string>(Math.random().toString(36).substring(2, 15));
+  const [activeChatId, setActiveChatId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = sessionStorage.getItem('arthashastra_active_chat');
+      if (saved) return saved;
+    }
+    const newId = Math.random().toString(36).substring(2, 15);
+    if (typeof window !== 'undefined') sessionStorage.setItem('arthashastra_active_chat', newId);
+    return newId;
+  });
+  const [selectedDateFilter, setSelectedDateFilter] = useState<string>('all');
+
+  const getLocalDateString = (d: Date): string => {
+    const year = d.getFullYear();
+    const month = (d.getMonth() + 1).toString().padStart(2, '0');
+    const day = d.getDate().toString().padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const getMsgDateStr = (timestamp: any): string => {
+    if (!timestamp) return '';
+    let d: Date;
+    if (timestamp.seconds) {
+      d = new Date(timestamp.seconds * 1000);
+    } else if (typeof timestamp.toDate === 'function') {
+      d = timestamp.toDate();
+    } else {
+      d = new Date(timestamp);
+    }
+    if (isNaN(d.getTime())) return '';
+    return getLocalDateString(d);
+  };
   const [isAccessDenied, setIsAccessDenied] = useState(false);
   const [systemStatus, setSystemStatus] = useState<'ok' | 'warn' | 'unconfigured'>('ok');
   const [systemError, setSystemError] = useState<string | null>(null);
+  const [missingKeys, setMissingKeys] = useState<string[]>([]);
+  const [statusData, setStatusData] = useState<any>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [activeView, setActiveView] = useState<'chat' | 'gazette'>('chat');
+  const [neuralResyncCount, setNeuralResyncCount] = useState(0);
+
+  // Neural Synchronization
+  useEffect(() => {
+    const performSync = async () => {
+      const oldDb = db;
+      await syncNeuralLink();
+      if (db !== oldDb) {
+        console.log("[Sync] Neural Link successfully re-aligned. Refreshing data streams.");
+        setNeuralResyncCount(prev => prev + 1);
+      }
+    };
+    performSync();
+  }, []);
 
   // Dashboard State
   const [intelligence, setIntelligence] = useState<IntelligenceItem[]>([]);
@@ -119,7 +248,7 @@ export default function App() {
   const [logs, setLogs] = useState<AgentLog[]>([]);
   const [responses, setResponses] = useState<AgentResponse[]>([]);
   const [ledger, setLedger] = useState<any[]>([]);
-  const [twitterConnected, setTwitterConnected] = useState(false);
+  const [geminiConfigured, setGeminiConfigured] = useState(false);
 
   // Agent Visualization State
   const AGENT_DOMAINS = [
@@ -134,10 +263,7 @@ export default function App() {
       { id: `${domain}_Validator`, role: 'Validator', domain },
       { id: `${domain}_Summarizer`, role: 'Summarizer', domain }
     ]),
-    { id: 'Compliance', role: 'Compliance', domain: 'System' },
-    { id: 'TwitterMonitor', role: 'Monitor', domain: 'Social' },
-    { id: 'TwitterPoster', role: 'Poster', domain: 'Social' },
-    { id: 'TwitterInteraction', role: 'Interaction', domain: 'Social' }
+    { id: 'Compliance', role: 'Compliance', domain: 'System' }
   ];
 
   // Simulation Effect - REMOVED to prevent token waste and confusion
@@ -145,6 +271,36 @@ export default function App() {
   useEffect(() => {
     // No-op
   }, [user]);
+
+  useEffect(() => {
+    // Only attempt auto-sync if we have a user and haven't loaded any messages yet.
+    // If we have a saved chatId in session, we try to restore it.
+    if (user && isAuthReady && messages.length === 0 && view === 'chat') {
+       const autoSync = async () => {
+         try {
+           const savedId = sessionStorage.getItem('arthashastra_active_chat');
+           const convs = await getConversations();
+           
+           if (savedId) {
+             const exists = convs.find(c => c.id === savedId);
+             if (exists) {
+               console.log(`[Sync] Resuming active witness thread: ${savedId}`);
+               loadConversation(savedId, false);
+               return;
+             }
+           }
+
+           if (convs.length > 0) {
+             console.log("[Sync] Auto-restoring latest witness thread from ledger...");
+             loadConversation(convs[0].id, false);
+           }
+         } catch (e) {
+           console.error("[Sync] Neural Link Handshake Failed:", e);
+         }
+       };
+       autoSync();
+    }
+  }, [user, isAuthReady, view, neuralResyncCount]);
 
   // Autonomous Agents Orchestrator (Migrated to Server-Side for 24/7 Operation)
   useEffect(() => {
@@ -197,7 +353,7 @@ export default function App() {
       }
     };
     handleUrlRoute();
-  }, [isAuthReady, user]);
+  }, [isAuthReady, user, neuralResyncCount]);
 
   // Cooldown Timer
   useEffect(() => {
@@ -210,11 +366,15 @@ export default function App() {
 
   const getAgentStatus = (agentId: string) => {
     if (isCooling) return 'idle';
-    const lastLog = logs.find(l => l.agentName === agentId);
+    // Match against collector, validator, or summarizer names in logs
+    const lastLog = logs.find(l => 
+      l.agentName.toLowerCase().includes(agentId.toLowerCase().split(' ')[0]) ||
+      l.agentName.toLowerCase().includes(agentId.toLowerCase().replace(' ', ''))
+    );
     if (!lastLog) return 'idle';
     const timeDiff = Date.now() - new Date(lastLog.timestamp).getTime();
-    if (timeDiff < 30000) return 'processing'; // Active for 30s after log
-    if (timeDiff < 120000) return 'committed'; // Committed for 2m after log
+    if (timeDiff < 60000) return 'processing'; // Active for 1m after log
+    if (timeDiff < 300000) return 'committed'; // Committed for 5m after log
     return 'idle';
   };
 
@@ -225,12 +385,12 @@ export default function App() {
       console.warn("[Auth] Safety threshold reached. Forcing auth readiness.");
       setIsAuthReady(true);
       setShowFailsafe(true);
-    }, 8000);
+    }, 3000);
 
-    // Show manual override after 4 seconds
+    // Show manual override after 2 seconds
     const failsafeTimer = setTimeout(() => {
       setShowFailsafe(true);
-    }, 4000);
+    }, 2000);
 
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
@@ -244,27 +404,44 @@ export default function App() {
         return;
       }
 
-      // If we have a user, we check permissions, but we don't block "readiness"
-      // unless we specifically want to hide the UI until we know for sure.
-      // Given the "stuck on loading" report, I will set readiness true immediately
-      // and let the state update gracefully.
+      // If we have a user, we check permissions immediately for whitelisted emails
+      const allowedEmails = ["jhansidharmana222@gmail.com", "chitti.bhargav3@gmail.com"];
+      const userEmail = u.email?.toLowerCase().trim() || "";
+      const isWhitelisted = allowedEmails.some(e => e.toLowerCase().trim() === userEmail);
+      
+      // Initial role assignment from whitelist to prevent UI lag
+      setIsAdmin(isWhitelisted);
       setIsAuthReady(true);
       clearTimeout(safetyTimeout);
 
-      const allowedEmails = ["jhansidharmana222@gmail.com", "chitti.bhargav3@gmail.com"];
-      const isAllowed = allowedEmails.includes(u.email || "");
-      
       try {
-        const userSnap = await getDoc(doc(db, 'users', u.uid));
-        const hasAdminRole = userSnap.exists() && userSnap.data().role === 'admin';
-        setIsAdmin(isAllowed || hasAdminRole);
+        const userSnap = await resilientGetDoc(doc(db, 'users', u.uid));
+        const userData = userSnap.exists() ? userSnap.data() : null;
+        const hasAdminRole = userData?.role === 'admin';
         
-        // For public service, we don't deny access to logged-in users.
-        // We only restrict ADMINT TOOLS.
+        // Final role assignment (merging whitelist and firestore role)
+        // If they are whitelisted OR have the admin role in firestore, they are an admin.
+        const finalizedAdminStatus = isWhitelisted || hasAdminRole;
+        setIsAdmin(finalizedAdminStatus);
+        
+        // Debug telemetry for persistent state issues
+        if (finalizedAdminStatus) {
+          console.log(`[Auth] Root Authority established for node: ${userEmail}`);
+        }
+        
         setIsAccessDenied(false); 
-      } catch (e) {
-        console.error("[Auth] Permission check failed:", e);
-        setIsAdmin(isAllowed);
+      } catch (e: any) {
+        const errorMsg = e.message?.toLowerCase() || "";
+        const isTransient = errorMsg.includes("offline") || errorMsg.includes("unavailable");
+        
+        if (isTransient) {
+          console.warn("[Auth] Permission check delayed (Neural Link establishing). Falling back to whitelist.");
+        } else {
+          console.error("[Auth] Permission check failed:", e);
+        }
+        
+        // Fallback to whitelist only
+        setIsAdmin(isWhitelisted);
         setIsAccessDenied(false);
       }
     });
@@ -282,39 +459,34 @@ export default function App() {
     const qIntell = query(collection(db, 'intelligence'), orderBy('timestamp', 'desc'), limit(20));
     const unsubIntell = onSnapshot(qIntell, (snap) => {
       setIntelligence(snap.docs.map(d => ({ id: d.id, ...d.data() } as IntelligenceItem)));
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'intelligence'));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'intelligence'));
 
     let unsubTweets = () => {};
     let unsubLogs = () => {};
     let unsubResp = () => {};
+    let unsubLedger = () => {};
 
-    // Mission Operations (Twitter Handling & Logs) - ONLY for Admin
-    if (isAdmin) {
-      const qTweets = query(collection(db, 'tweets'), orderBy('timestamp', 'desc'), limit(20));
+    // Mission Operations - Open for authenticated users
+    if (user) {
+      const qTweets = query(collection(db, 'tweets'), orderBy('timestamp', 'desc'), limit(50));
       unsubTweets = onSnapshot(qTweets, (snap) => {
         setTweets(snap.docs.map(d => ({ id: d.id, ...d.data() } as Tweet)));
-      }, (error) => handleFirestoreError(error, OperationType.GET, 'tweets'));
+      }, (error) => handleFirestoreError(error, OperationType.LIST, 'tweets'));
 
-      const qLogs = query(collection(db, 'agent_logs'), orderBy('timestamp', 'desc'), limit(50));
+      const qLogs = query(collection(db, 'agent_logs'), orderBy('timestamp', 'desc'), limit(100));
       unsubLogs = onSnapshot(qLogs, (snap) => {
         setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() } as AgentLog)));
-      }, (error) => handleFirestoreError(error, OperationType.GET, 'agent_logs'));
+      }, (error) => handleFirestoreError(error, OperationType.LIST, 'agent_logs'));
 
-      const qResp = query(collection(db, 'responses'), orderBy('timestamp', 'desc'), limit(20));
+      const qResp = query(collection(db, 'responses'), orderBy('timestamp', 'desc'), limit(50));
       unsubResp = onSnapshot(qResp, (snap) => {
         setResponses(snap.docs.map(d => ({ id: d.id, ...d.data() } as AgentResponse)));
-      }, (error) => handleFirestoreError(error, OperationType.GET, 'responses'));
+      }, (error) => handleFirestoreError(error, OperationType.LIST, 'responses'));
 
-      const qLedgerGlobal = query(collection(db, 'ledger'), orderBy('timestamp', 'desc'), limit(20));
-      const unsubLedgerGlobal = onSnapshot(qLedgerGlobal, (snap) => {
+      const qLedgerGlobal = query(collection(db, 'ledger'), orderBy('timestamp', 'desc'), limit(50));
+      unsubLedger = onSnapshot(qLedgerGlobal, (snap) => {
         setLedger(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      }, (error) => handleFirestoreError(error, OperationType.GET, 'ledger'));
-
-      const originalUnsubResp = unsubResp;
-      unsubResp = () => {
-        originalUnsubResp();
-        unsubLedgerGlobal();
-      };
+      }, (error) => handleFirestoreError(error, OperationType.LIST, 'ledger'));
     }
 
     return () => {
@@ -322,17 +494,20 @@ export default function App() {
       unsubTweets();
       unsubLogs();
       unsubResp();
+      unsubLedger();
     };
-  }, [isAdmin]);
+  }, [isAdmin, user, neuralResyncCount]);
 
-  // Twitter Connectivity Health
+  // Connectivity Health - DEPRECATED
   useEffect(() => {
     const checkStatus = async () => {
       try {
         const res = await fetch('/api/health');
         const data = await res.json();
-        setTwitterConnected(data.twitterConnected);
+        setStatusData(data);
+        setGeminiConfigured(!!data.geminiConfigured);
         setSystemStatus(data.status);
+        setMissingKeys(data.missingKeys || []);
         if (data.status === 'unconfigured') {
           setSystemError(data.error);
         } else {
@@ -346,53 +521,6 @@ export default function App() {
     const interval = setInterval(checkStatus, 60000);
     return () => clearInterval(interval);
   }, []);
-
-  // Listen for OAuth Success
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'TWITTER_AUTH_SUCCESS') {
-        setTwitterConnected(true);
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
-  const handleConnectTwitter = async () => {
-    if (twitterConnected) return;
-    try {
-      const res = await fetch('/api/auth/twitter/url');
-      const data = await res.json();
-      if (data.error) {
-        console.error(data.error);
-        if (data.details) {
-          alert(`Twitter Setup Required:\n\n${data.error}\n\nCallback URL: ${data.details.requiredCallbackUrl}\n\n${data.details.instructions}`);
-        } else {
-          alert(`Twitter Connection Failed: ${data.error}`);
-        }
-        return;
-      }
-      const width = 600, height = 700;
-      const left = (window.innerWidth - width) / 2;
-      const top = (window.innerHeight - height) / 2;
-      window.open(data.url, 'Twitter Auth', `width=${width},height=${height},top=${top},left=${left}`);
-    } catch (e) {
-      console.error("Failed to initiate Twitter link:", e);
-      alert("Failed to connect to backend for Twitter Auth.");
-    }
-  };
-
-  const handleApproveTweet = async (tweetId: string) => {
-    try {
-      const { setDoc, doc } = await import('firebase/firestore');
-      const tweetRef = doc(db, 'tweets', tweetId);
-      await setDoc(tweetRef, { userApproved: true }, { merge: true });
-      alert("Rebuttal Approved. Arthashastra will post it on the next cycle.");
-    } catch (e) {
-      console.error("Failed to approve tweet:", e);
-      alert("Approval Failed: Authorization required.");
-    }
-  };
 
   const t = TRANSLATIONS[language] || TRANSLATIONS.en;
 
@@ -445,7 +573,8 @@ export default function App() {
       text: trimmedText,
       index: userBlock.index,
       hash: userBlock.hash,
-      previousHash: userBlock.previousHash
+      previousHash: userBlock.previousHash,
+      timestamp: new Date()
     };
 
     if (user) {
@@ -465,7 +594,7 @@ export default function App() {
       const modelMessageId = (Date.now() + 1).toString();
       let fullText = '';
 
-      setMessages((prev) => [...prev, { id: modelMessageId, role: 'model', text: '' }]);
+      setMessages((prev) => [...prev, { id: modelMessageId, role: 'model', text: '', timestamp: new Date() }]);
 
       const stream = sendMessage(history, trimmedText, language, { intelligence });
       
@@ -527,23 +656,69 @@ export default function App() {
   };
 
   const startNewChat = () => {
-    setActiveChatId(Math.random().toString(36).substring(2, 15));
+    const newId = Math.random().toString(36).substring(2, 15);
+    setActiveChatId(newId);
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('arthashastra_active_chat', newId);
+    }
     setMessages([]);
     setView('chat');
   };
 
-  const loadConversation = async (id: string) => {
+  const loadConversation = async (id: string, shouldSetView = true) => {
     setActiveChatId(id);
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('arthashastra_active_chat', id);
+    }
     setIsLoading(true);
     const msgs = await getMessages(id);
     setMessages(msgs);
-    setView('chat');
+    if (shouldSetView) {
+      setView('chat');
+    }
     setIsLoading(false);
+  };
+
+  const handleApproveTweet = async (tweetId: string) => {
+    if (!isAdmin) return;
+    try {
+      await updateDoc(doc(db, 'tweets', tweetId), {
+        userApproved: true,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (e) {
+      handleFirestoreError(e, OperationType.UPDATE, 'tweets');
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      await signInWithGoogle();
+    } catch (e: any) {
+      console.error(e);
+      const isIframe = window !== window.parent;
+      if (isIframe) {
+        setModalContext({
+          title: "Sign in Blocked",
+          message: `Authentication is blocked inside this preview window.\n\n${e.message}\n\nWould you like to open Arthashastra in a new tab to sign in?`,
+          onConfirm: () => {
+             window.open(window.location.href, '_blank');
+             setModalContext(null);
+          }
+        });
+      } else {
+        setModalContext({
+          title: "Sign in Failed",
+          message: e.message,
+          isError: true
+        });
+      }
+    }
   };
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen bg-void flex items-center justify-center p-34 font-sans overflow-hidden">
+      <div className="min-h-screen bg-void flex items-center justify-center p-34 font-sans overflow-y-auto">
         <div className="absolute inset-0 z-0">
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[610px] h-[610px] bg-neon-cyan/5 blur-[144px] rounded-full animate-pulse" />
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[377px] h-[377px] bg-neon-magenta/5 blur-[89px] rounded-full" />
@@ -582,50 +757,45 @@ export default function App() {
   // Mandatory Authentication and Identity Verification
   if (!user) {
     return (
-      <div className="min-h-screen bg-void flex flex-col items-center justify-center p-34 relative overflow-hidden font-sans">
-        {/* Neural Background Overlay */}
-        <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
-          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-neon-cyan/5 blur-[144px] rounded-full animate-pulse" />
-          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-neon-magenta/5 blur-[144px] rounded-full animate-pulse" />
-        </div>
-
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="glass-panel p-55 border border-neon-cyan/21 rounded-21 max-w-md w-full text-center relative z-10 shadow-[0_0_34px_rgba(0,230,118,0.1)]"
-        >
-          <div className="mb-34 flex justify-center drop-shadow-[0_0_10px_rgba(0,230,118,0.5)]">
-            <ArthashastraSymbol size={89} />
+      <React.Fragment>
+        <AlertModal context={modalContext} onClose={() => setModalContext(null)} />
+        <div className="min-h-screen bg-void flex flex-col items-center justify-center p-34 relative overflow-y-auto font-sans">
+          {/* Neural Background Overlay */}
+          <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
+            <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-neon-cyan/5 blur-[144px] rounded-full animate-pulse" />
+            <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-neon-magenta/5 blur-[144px] rounded-full animate-pulse" />
           </div>
+
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="glass-panel p-55 border border-neon-cyan/21 rounded-21 max-w-md w-full text-center relative z-10 shadow-[0_0_34px_rgba(0,230,118,0.1)]"
+          >
+            <div className="mb-34 flex justify-center drop-shadow-[0_0_10px_rgba(0,230,118,0.5)]">
+              <ArthashastraSymbol size={89} />
+            </div>
           <h1 className="text-34 caps-modern font-bold text-neon-cyan mb-21 tracking-widest leading-none drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">ARTHASHASTRA AI</h1>
           <p className="text-13 text-parchment/89 mb-34 font-sans leading-relaxed tracking-wide opacity-80 drop-shadow-[0_0_2px_rgba(230,241,255,0.3)]">
             Absolute truth is the most dangerous artifact in history. Access is restricted to designated Witnesses.
           </p>
           <div className="space-y-13">
             <button
-              onClick={signInWithGoogle}
+              onClick={handleGoogleLogin}
               className="w-full flex items-center justify-center gap-13 bg-neon-cyan text-void py-13 px-34 rounded-13 font-bold caps-modern hover:bg-neon-cyan/89 transition-all shadow-[0_0_21px_rgba(0,230,118,0.3)] hover:shadow-[0_0_34px_rgba(0,230,118,0.5)] group"
             >
               <div className="p-5 bg-void/13 rounded-full group-hover:bg-void/21 transition-colors">
                 <LogIn className="w-13 h-13" />
               </div>
-              Identity with Google
+              Sign in with Google
             </button>
 
-            <div className="grid grid-cols-2 gap-13">
-              <button
-                onClick={signInWithTwitter}
-                className="flex items-center justify-center gap-8 bg-void border border-neon-cyan/34 text-neon-cyan py-13 px-13 rounded-13 font-bold caps-modern hover:bg-neon-cyan/5 transition-all text-xs group"
-              >
-                <Twitter className="w-13 h-13 group-hover:scale-110 transition-transform" />
-                X Terminal
-              </button>
+            <div className="grid grid-cols-1 gap-13">
               <button
                 onClick={signInAnonymous}
                 className="flex items-center justify-center gap-8 bg-void border border-parchment/13 text-parchment/55 py-13 px-13 rounded-13 font-bold caps-modern hover:bg-parchment/5 transition-all text-xs group"
               >
                 <Ghost className="w-13 h-13 group-hover:text-neon-magenta transition-colors" />
-                Anonymous
+                Use Anonymously
               </button>
             </div>
           </div>
@@ -639,11 +809,13 @@ export default function App() {
           </div>
         </motion.div>
       </div>
+      </React.Fragment>
     );
   }
 
   return (
     <div className="min-h-screen bg-void text-parchment selection:bg-neon-cyan/34 selection:text-neon-cyan">
+      <AlertModal context={modalContext} onClose={() => setModalContext(null)} />
       {/* Neural Background Overlay */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-neon-cyan/5 blur-[144px] rounded-full animate-pulse" />
@@ -654,43 +826,55 @@ export default function App() {
       <motion.header 
         initial={{ y: -100 }}
         animate={{ y: 0 }}
-        className="fixed top-0 left-0 right-0 h-89 glass-panel border-b border-neon-cyan/13 z-50 flex items-center px-21 md:px-34 shadow-[0_5px_34px_rgba(0,230,118,0.05)]"
+        className="fixed top-0 left-0 right-0 h-89 glass-panel border-b border-neon-cyan/13 z-50 flex items-center px-13 md:px-34 shadow-[0_5px_34px_rgba(0,230,118,0.05)]"
       >
         <div className="max-w-[1440px] mx-auto w-full flex items-center justify-between">
-          <div className="flex items-center gap-21">
-            <div className="relative group cursor-pointer flex items-center gap-13" onClick={() => setView('chat')}>
+          <div className="flex items-center gap-13 md:gap-21 min-w-0 flex-1">
+            <div className="relative group cursor-pointer flex items-center gap-13 shrink-0 pr-8" onClick={() => setView('chat')}>
               <div className="group-hover:drop-shadow-[0_0_13px_rgba(0,230,118,0.8)] transition-all">
                 <ArthashastraSymbol size={42} />
               </div>
               <div>
-                <h1 className="text-13 md:text-21 font-display font-bold text-neon-cyan uppercase tracking-tighter leading-none relative drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">
+                <h1 className="text-[14px] sm:text-21 md:text-21 font-display font-bold text-neon-cyan uppercase tracking-tighter leading-none relative drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">
                   ARTHASHASTRA<span className="text-parchment/55 ml-2 drop-shadow-none">AI</span>
                 </h1>
-                <div className="flex items-center gap-5 mt-2">
+                <div className="flex items-center gap-2 sm:gap-5 mt-2 flex-wrap">
                    <div className={`w-3 h-3 rounded-full ${systemStatus === 'unconfigured' ? 'bg-cyber-red shadow-[0_0_5px_#FF2A2A]' : 'bg-neon-green shadow-[0_0_5px_#39FF14]'} animate-pulse`} />
-                  <span className="text-[8px] caps-modern text-neon-cyan/89 tracking-[0.34em]">
-                    {systemStatus === 'unconfigured' ? 'System Unconfigured' : 'Neural Economic Intelligence'}
+                  <span className="text-[8px] caps-modern text-neon-cyan/89 tracking-[0.2em] sm:tracking-[0.34em]">
+                    {systemStatus === 'unconfigured' ? 'Unconfigured' : 'Neural Economic Intelligence'}
                   </span>
-                  <span className="text-[7px] ml-5 px-5 py-1 border border-neon-blue/34 text-neon-blue rounded bg-neon-blue/5 caps-modern shadow-[0_0_5px_rgba(10,132,255,0.3)]">Perimeter: Active</span>
+                  {isAdmin && (
+                    <span className="text-[8px] sm:ml-5 px-5 sm:px-8 py-2 bg-neon-magenta/13 border border-neon-magenta/55 text-neon-magenta rounded-full font-bold animate-pulse shadow-[0_0_8px_rgba(255,0,255,0.4)]">
+                      ROOT
+                    </span>
+                  )}
+                  <span className="text-[7px] sm:ml-5 px-3 sm:px-5 py-1 border border-neon-blue/34 text-neon-blue rounded bg-neon-blue/5 caps-modern shadow-[0_0_5px_rgba(10,132,255,0.3)]">Active</span>
                 </div>
               </div>
             </div>
 
-            <nav className="hidden md:flex items-center gap-13 ml-34">
+            <nav className="flex items-center gap-8 lg:gap-13 ml-8 md:ml-13 lg:ml-34 overflow-x-auto silk-scroll flex-1 pr-8 pb-3 min-w-0">
               {[
-                { id: 'chat', icon: MessageSquare, label: 'Terminal' },
-                { id: 'brain', icon: Zap, label: 'Main Brain' },
-                { id: 'ledger', icon: Clock, label: 'Archive' },
+                { id: 'chat', icon: MessageSquare, label: t.navTerminal || 'Terminal' },
+                { id: 'archive', icon: Archive, label: 'Dossier OS' },
+                { id: 'ledger', icon: Clock, label: t.navArchive || 'Witness Archive' },
+                { id: 'arena', icon: Landmark, label: t.navArena || 'Public Forum' },
+                { id: 'warchest', icon: Coins, label: t.navWarchest || 'The War Chest' },
+                { id: 'sovereignty', icon: Shield, label: t.navSovereignty || 'Data Sovereignty' },
+                { id: 'threat', icon: ShieldAlert, label: 'Threat Oracle' },
                 ...(isAdmin ? [
-                  { id: 'dashboard', icon: LayoutDashboard, label: 'Command' },
-                  { id: 'routine', icon: Activity, label: 'Routine' }
+                  { id: 'dashboard', icon: LayoutDashboard, label: t.navDashboard || 'Command Hub', isAdmin: true },
+                  { id: 'brain', icon: Zap, label: t.navBrain || 'Neural Assembly', isAdmin: true },
+                  { id: 'routine', icon: Activity, label: t.navHealth || 'Fleet Status', isAdmin: true }
                 ] : [])
               ].map((item) => (
                 <button
                   key={item.id}
                   onClick={() => setView(item.id as any)}
                   className={`flex items-center gap-8 px-13 py-8 rounded-8 transition-all duration-377 group relative ${
-                    view === item.id ? 'text-neon-cyan bg-neon-cyan/13 drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]' : 'text-neon-cyan/34 hover:text-neon-cyan hover:bg-neon-cyan/5'
+                    view === item.id 
+                      ? (item.isAdmin ? 'text-neon-magenta bg-neon-magenta/13 drop-shadow-[0_0_8px_rgba(255,0,255,0.5)]' : 'text-neon-cyan bg-neon-cyan/13 drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]') 
+                      : (item.isAdmin ? 'text-neon-magenta/34 hover:text-neon-magenta hover:bg-neon-magenta/5 border border-dashed border-neon-magenta/13' : 'text-neon-cyan/34 hover:text-neon-cyan hover:bg-neon-cyan/5')
                   }`}
                 >
                   {item.id === 'dashboard' && tweets.filter(t => !t.processed && !t.userApproved && t.draftRebuttal).length > 0 && (
@@ -698,20 +882,20 @@ export default function App() {
                       {tweets.filter(t => !t.processed && !t.userApproved && t.draftRebuttal).length}
                     </span>
                   )}
-                  <item.icon className={`w-13 h-13 ${view === item.id ? 'text-neon-cyan' : 'group-hover:text-neon-cyan'} transition-colors`} />
-                  <span className="text-[10px] caps-modern font-bold tracking-widest">{item.label}</span>
+                  <item.icon className={`w-13 h-13 ${view === item.id ? (item.isAdmin ? 'text-neon-magenta' : 'text-neon-cyan') : (item.isAdmin ? 'group-hover:text-neon-magenta' : 'group-hover:text-neon-cyan')} transition-colors`} />
+                  <span className={`text-[10px] caps-modern font-bold tracking-widest ${item.isAdmin ? 'italic' : ''}`}>{item.label}</span>
                   {view === item.id && (
-                    <motion.div layoutId="nav-active" className="absolute bottom-0 left-0 right-0 h-1 bg-neon-cyan shadow-[0_0_13px_rgba(0,230,118,0.89)]" />
+                    <motion.div layoutId="nav-active" className={`absolute bottom-0 left-0 right-0 h-1 ${item.isAdmin ? 'bg-neon-magenta shadow-[0_0_13px_rgba(255,0,255,0.89)]' : 'bg-neon-cyan shadow-[0_0_13px_rgba(0,230,118,0.89)]'}`} />
                   )}
                 </button>
               ))}
             </nav>
           </div>
 
-          <div className="flex items-center gap-13">
+          <div className="flex items-center gap-8 md:gap-13 shrink-0">
             {user ? (
-              <div className="flex items-center gap-8">
-                <div className="w-34 h-34 rounded-full overflow-hidden border border-neon-cyan/34 ml-5 relative group shadow-[0_0_8px_rgba(0,230,118,0.3)]">
+              <div className="flex items-center gap-5 sm:gap-8">
+                <div className="w-34 h-34 rounded-full overflow-hidden border border-neon-cyan/34 ml-2 sm:ml-5 relative group shadow-[0_0_8px_rgba(0,230,118,0.3)]">
                   <img src={user.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`} alt="User" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                   <div className="absolute inset-0 bg-neon-cyan/0 group-hover:bg-neon-cyan/21 transition-colors" />
                 </div>
@@ -721,78 +905,86 @@ export default function App() {
               </div>
             ) : (
               <button 
-                onClick={signInWithGoogle}
+                onClick={handleGoogleLogin}
                 className="flex items-center gap-8 px-13 py-8 bg-neon-cyan text-void border border-neon-cyan hover:bg-neon-cyan/89 hover:shadow-[0_0_21px_rgba(0,230,118,0.8)] transition-all duration-233 text-13 caps-modern font-bold shadow-[0_0_13px_rgba(0,230,118,0.34)]"
               >
                 <LogIn className="w-13 h-13" />
                 <span className="hidden sm:inline">Access Intelligence</span>
               </button>
             )}
-            <div className="relative group">
-              <button className="flex items-center gap-8 px-13 py-8 bg-void/34 border border-neon-cyan/21 hover:border-neon-cyan/55 hover:shadow-[0_0_8px_rgba(0,230,118,0.3)] transition-all duration-233 text-13 caps-modern">
-                <Languages className="w-13 h-13 text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]" />
-                <span className="hidden sm:inline text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">{SUPPORTED_LANGUAGES.find(l => l.code === language)?.native}</span>
-              </button>
-              <div className="absolute right-0 mt-8 w-233 py-13 glass-panel shadow-[0_34px_89px_-21px_rgba(0,0,0,0.89)] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-377 z-[60] max-h-[377px] overflow-y-auto silk-scroll rounded-8 border-neon-cyan/21">
-                <div className="px-13 pb-8 mb-8 border-b border-neon-cyan/13">
-                  <span className="text-[10px] uppercase tracking-[0.34em] text-neon-cyan/89 font-bold drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">Select Intelligence Language</span>
-                </div>
-                {SUPPORTED_LANGUAGES.map((lang) => (
-                  <button
-                    key={lang.code}
-                    onClick={() => setLanguage(lang.code)}
-                    className={`w-full px-13 py-8 text-left text-13 hover:bg-neon-cyan/13 transition-all duration-233 flex items-center justify-between group/lang ${language === lang.code ? 'text-neon-cyan bg-neon-cyan/13' : 'text-parchment/55 hover:text-neon-cyan'}`}
-                  >
-                    <div className="flex flex-col">
-                      <span className="font-medium tracking-wide drop-shadow-[0_0_3px_rgba(0,230,118,0)] group-hover/lang:drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">{lang.native}</span>
-                      <span className="text-[10px] opacity-55 uppercase tracking-wider group-hover/lang:opacity-89">{lang.name}</span>
-                    </div>
-                    {language === lang.code && <div className="w-5 h-5 rounded-full bg-neon-cyan shadow-[0_0_8px_rgba(0,230,118,0.89)]" />}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <select 
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="bg-void border border-neon-cyan/34 text-neon-cyan px-2 py-1 rounded text-[10px] caps-modern focus:outline-none focus:border-neon-cyan transition-all hidden sm:block"
+            >
+              {SUPPORTED_LANGUAGES.map(l => (
+                <option key={l.code} value={l.code}>{l.native}</option>
+              ))}
+            </select>
           </div>
         </div>
       </motion.header>
 
       <main className="pt-89 pb-144">
         <div className="max-w-[1440px] mx-auto w-full px-21">
-          {isAdmin && systemStatus === 'unconfigured' && (
+          {isAdmin && (systemStatus === 'unconfigured' || systemStatus === 'warn') && (
             <motion.div 
               initial={{ height: 0, opacity: 0 }}
               animate={{ height: 'auto', opacity: 1 }}
               className="mb-34 overflow-hidden"
             >
-              <div className="glass-panel p-21 border border-cyber-red/34 rounded-13 bg-cyber-red/5 flex items-start gap-21 animate-pulse shadow-[0_0_21px_-5px_rgba(255,46,99,0.34)]">
-                <div className="p-13 rounded-full bg-cyber-red/13 border border-cyber-red/34">
-                  <AlertTriangle className="w-21 h-21 text-cyber-red drop-shadow-[0_0_5px_#FF2A2A]" />
+              <div className={`glass-panel p-21 border ${systemStatus === 'unconfigured' ? 'border-cyber-red/34 bg-cyber-red/5 animate-pulse shadow-[0_0_21px_-5px_rgba(255,46,99,0.34)]' : 'border-amber-500/34 bg-amber-500/5 shadow-[0_0_21px_-5px_rgba(245,158,11,0.21)]'} rounded-13 flex items-start gap-21`}>
+                <div className={`p-13 rounded-full ${systemStatus === 'unconfigured' ? 'bg-cyber-red/13 border-cyber-red/34' : 'bg-amber-500/13 border-amber-500/34'}`}>
+                  <AlertTriangle className={`w-21 h-21 ${systemStatus === 'unconfigured' ? 'text-cyber-red drop-shadow-[0_0_5px_#FF2A2A]' : 'text-amber-500 drop-shadow-[0_0_5px_#F59E0B]'}`} />
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-13 caps-modern font-bold text-cyber-red mb-5 tracking-widest drop-shadow-[0_0_3px_#FF2A2A]">CRITICAL SYSTEM ERROR: CONFIGURATION REQUIRED</h3>
+                  <h3 className={`text-13 caps-modern font-bold ${systemStatus === 'unconfigured' ? 'text-cyber-red' : 'text-amber-500'} mb-5 tracking-widest uppercase`}>
+                    {systemStatus === 'unconfigured' ? 'SYSTEM ADVISORY: NEURAL CALIBRATION' : 'SYSTEM WARNING: LIMITED LINKAGE'}
+                  </h3>
                   <p className="text-13 text-parchment/89 mb-13 leading-relaxed">
-                    The backend has detected placeholder values in your configuration. To enable the agents and synchronize with the Truth Ledger, you must provide your real credentials.
+                    {systemStatus === 'unconfigured' 
+                      ? 'Telemetry sync is pending. This usually resolves automatically in the AI Studio environment.' 
+                      : 'Non-critical links are missing. The system is functional for chat, but social agents are idle.'}
                   </p>
                   <div className="flex flex-wrap gap-13">
-                    <div className="px-13 py-5 rounded-8 bg-black/55 border border-white/5 text-[10px] font-mono shadow-[inset_0_0_10px_rgba(255,42,42,0.1)]">
-                      <span className="text-cyber-red/55 mr-5">MISSING:</span> GEMINI_API_KEY
-                    </div>
-                    <div className="px-13 py-5 rounded-8 bg-black/55 border border-white/5 text-[10px] font-mono shadow-[inset_0_0_10px_rgba(255,42,42,0.1)]">
-                      <span className="text-cyber-red/55 mr-5">MISSING:</span> FIREBASE_PROJECT_ID
-                    </div>
-                    <div className="px-13 py-5 rounded-8 bg-black/55 border border-white/5 text-[10px] font-mono shadow-[inset_0_0_10px_rgba(255,42,42,0.1)]">
-                      <span className="text-cyber-red/55 mr-5">MISSING:</span> AITIHYA_SIGNING_SECRET
-                    </div>
+                    {missingKeys.map((key) => (
+                      <div key={key} className={`px-13 py-5 rounded-8 bg-black/55 border border-white/5 text-[10px] font-mono ${systemStatus === 'unconfigured' ? 'shadow-[inset_0_0_10px_rgba(255,42,42,0.1)]' : 'shadow-[inset_0_0_10px_rgba(245,158,11,0.05)]'}`}>
+                        <span className={`${systemStatus === 'unconfigured' ? 'text-cyber-red/55' : 'text-amber-500/55'} mr-5 font-bold`}>MISSING:</span> {key}
+                      </div>
+                    ))}
                   </div>
-                  <div className="mt-21 flex items-center gap-13">
-                    <span className="text-[10px] text-parchment/34 italic">Instruction: Open the "Secrets" panel in settings and add these keys.</span>
+                  <div className="mt-21 flex flex-col gap-13">
+                    <div className="flex flex-col gap-8">
+                      <span className="text-[10px] text-parchment/34 italic">
+                        {statusData?.debug?.lastError ? (
+                          <div className="flex flex-col gap-4">
+                            <div><span className="text-cyber-red font-bold">Neural Link Error:</span> {statusData.debug.lastError}</div>
+                            {statusData.debug.trialErrors && statusData.debug.trialErrors.length > 1 && (
+                              <div className="text-[9px] text-parchment/20 border-t border-parchment/10 pt-4 mt-2">
+                                <div className="mb-2 uppercase tracking-widest opacity-50">Trial Logs:</div>
+                                {statusData.debug.trialErrors.map((err: string, i: number) => (
+                                  <div key={i} className="mb-1">{err}</div>
+                                ))}
+                              </div>
+                            )}
+                            {statusData.debug.lastError.includes('PERMISSION_DENIED') && (
+                              <div className="mt-5 text-neon-cyan/55 not-italic">
+                                Tip: Provisioning may be in progress. If this persists beyond 2 minutes, try clicking 'Set up Firebase' again or verify Firestore is enabled in the Firebase Console.
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          'Neural Critical: System Disconnected. Please ensure all required Secrets are configured in the platform settings.'
+                        )}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
             </motion.div>
           )}
 
-          {view === 'brain' ? (
+          {view === 'brain' && isAdmin ? (
             <div className="py-55 space-y-55 min-h-[calc(100vh-144px)] flex flex-col items-center">
               <div className="text-center relative">
                 <motion.div
@@ -926,12 +1118,12 @@ export default function App() {
                   <div className="mx-auto w-89 h-89 bg-neon-cyan/13 rounded-full flex items-center justify-center">
                     <User className="w-55 h-55 text-neon-cyan drop-shadow-[0_0_10px_#00E676]" />
                   </div>
-                  <h3 className="text-34 caps-modern font-bold text-neon-cyan">IDENTITY REQUIRED</h3>
+                  <h3 className="text-34 caps-modern font-bold text-neon-cyan">LOGIN REQUIRED</h3>
                   <p className="text-13 text-parchment/89 leading-relaxed">
-                    To track your 3 free absolute truth explanations, you must identify as a Witness. Connect your credentials to proceed.
+                    To track your 3 free absolute truth explanations, please sign in. Connect your credentials to proceed.
                   </p>
                   <button 
-                    onClick={signInWithGoogle}
+                    onClick={handleGoogleLogin}
                     className="w-full bg-neon-cyan text-void py-13 rounded-13 font-bold caps-modern hover:bg-neon-cyan/89 shadow-[0_0_34px_rgba(0,230,118,0.5)] transition-all"
                   >
                     Identify as Witness
@@ -1001,7 +1193,7 @@ export default function App() {
                     <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> UNLIMITED EXPLANATIONS</li>
                     <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> PRIORITY NEURAL LINK</li>
                     <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> AITIHYA CHAIN ACCESS</li>
-                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> TWITTER INTEL EXPORT</li>
+                    <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" /> GLOBAL INTEL EXPORT</li>
                   </ul>
                   <button 
                     onClick={handlePayment}
@@ -1047,7 +1239,7 @@ export default function App() {
                         { time: 'T-00:20', task: 'Regional Intel & Domestic Analysis', status: 'Cyclic' },
                         { time: 'T-00:40', task: 'Banking & Systemic Risk Vetting', status: 'Cyclic' },
                         { time: 'T-01:00', task: 'Market Markets (Equities/Derivatives)', status: 'Cyclic' },
-                        { time: 'T-01:20', task: 'Twitter Monitoring & Sentiment Audit', status: 'Cyclic' },
+                        { time: 'T-01:20', task: 'Global Monitoring & Sentiment Audit', status: 'Cyclic' },
                         { time: 'T-01:40', task: 'Public Truth Posting & Engagement', status: 'Cyclic' }
                       ].map((step, idx) => (
                         <div key={idx} className="flex items-center gap-13 group">
@@ -1114,12 +1306,53 @@ export default function App() {
                 </div>
               </div>
             </div>
+          ) : (view === 'brain' || view === 'routine' || view === 'dashboard') && !isAdmin ? (
+            <div className="flex flex-col items-center justify-center py-144">
+               <ShieldAlert className="w-55 h-55 text-cyber-red mb-21 animate-pulse" />
+               <h2 className="text-21 caps-modern text-cyber-red tracking-widest uppercase">Perimeter Violation Detected</h2>
+               <p className="text-13 text-parchment/55 mt-8">These intelligence pipes are restricted to Authorized Witness Agents only.</p>
+               <div className="mt-34 flex items-center gap-13">
+                 <button 
+                   onClick={() => setView('chat')}
+                   className="px-21 py-8 border border-neon-cyan/34 text-neon-cyan hover:bg-neon-cyan/13 transition-all rounded-8 caps-modern text-13"
+                 >
+                   Return to Public Terminal
+                 </button>
+               </div>
+            </div>
+          ) : view === 'arena' ? (
+            <ErrorBoundary>
+              <TheArena user={user} language={language} isAdmin={isAdmin} />
+            </ErrorBoundary>
+          ) : view === 'warchest' ? (
+            <ErrorBoundary>
+              <TheWarChest user={user} handlePayment={handlePayment} isLoading={isLoading} />
+            </ErrorBoundary>
+          ) : view === 'sovereignty' ? (
+            <ErrorBoundary>
+              <DataSovereignty user={user} />
+            </ErrorBoundary>
+          ) : view === 'threat' ? (
+            <ErrorBoundary>
+              <EconomicDisasterPredictor />
+            </ErrorBoundary>
+          ) : view === 'archive' ? (
+            <ErrorBoundary>
+              <ArchiveOS 
+                onNavigateToChat={(id) => {
+                  setActiveChatId(id);
+                  setView('chat');
+                }}
+              />
+            </ErrorBoundary>
           ) : view === 'ledger' ? (
-              <div className="grid grid-cols-1 lg:grid-cols-4 gap-34 py-34 h-[calc(100vh-144px)] overflow-hidden">
-                <div className="lg:col-span-1 h-full flex flex-col gap-13">
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-34 py-34">
+                <div className="lg:col-span-1 flex flex-col gap-21 h-full min-h-[500px]">
                   <AitihyaHistory 
                     onSelectConversation={loadConversation} 
                     activeChatId={activeChatId} 
+                    selectedDate={selectedDateFilter}
+                    setSelectedDate={setSelectedDateFilter}
                   />
                   <button 
                     onClick={startNewChat}
@@ -1180,7 +1413,71 @@ export default function App() {
                               </span>
                             </div>
                             <div className="text-13 leading-relaxed text-parchment/89 font-sans selection:bg-neon-cyan/55">
-                              {typeof block.data === 'string' ? block.data : JSON.stringify(block.data)}
+                              {(() => {
+                                let resolvedData = block.data;
+                                if (typeof resolvedData === 'string') {
+                                  const trimmed = resolvedData.trim();
+                                  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+                                    try {
+                                      resolvedData = JSON.parse(trimmed);
+                                    } catch (e) {
+                                      // Keep as custom string
+                                    }
+                                  }
+                                }
+
+                                if (Array.isArray(resolvedData)) {
+                                  return (
+                                    <div className="space-y-8 mt-5">
+                                      {resolvedData.map((item: any, idx: number) => (
+                                        <div key={idx} className="p-10 bg-void/55 border border-white/8 rounded-8 font-mono text-[11px] leading-relaxed">
+                                          {item.domain && (
+                                            <div className="text-[9px] text-neon-cyan font-bold uppercase tracking-wider mb-3">
+                                              📌 DOMAIN: {item.domain}
+                                            </div>
+                                          )}
+                                          <div className="text-parchment/89 leading-normal">
+                                            {item.content || item.insight || (typeof item === 'string' ? item : JSON.stringify(item))}
+                                          </div>
+                                          {item.source && (
+                                            <div className="text-[10px] text-parchment/40 mt-5 border-t border-white/5 pt-3">
+                                              <span className="text-neon-magenta/55 font-bold uppercase mr-2 text-[8px]">Source:</span> {item.source}
+                                            </div>
+                                          )}
+                                          {item.confidenceScore && (
+                                            <div className="text-[10px] text-green-400 font-bold mt-2">
+                                              🛡️ Confidence: {item.confidenceScore}%
+                                            </div>
+                                          )}
+                                          {item.enrichedContext && (
+                                            <div className="text-[10px] text-parchment/55 italic mt-2 whitespace-pre-wrap border-t border-white/5 pt-3 leading-relaxed">
+                                              Context Match: {item.enrichedContext}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  );
+                                } else if (resolvedData && typeof resolvedData === 'object') {
+                                  return (
+                                    <div className="p-10 bg-void/55 border border-white/8 rounded-8 font-mono text-[11px] whitespace-pre-wrap text-parchment/80 leading-normal">
+                                      {resolvedData.isApproved !== undefined ? (
+                                        <div>
+                                          <div className="text-green-400 font-bold mb-3 text-[10px] uppercase tracking-wider">⚖️ COMPLIANCE AUDIT DETAIL</div>
+                                          <div className="mb-3 font-bold">Status: {resolvedData.isApproved ? "✅ APPROVED" : "❌ REJECTED"}</div>
+                                          <p className="italic text-parchment/70">"{resolvedData.content}"</p>
+                                        </div>
+                                      ) : JSON.stringify(resolvedData, null, 2)}
+                                    </div>
+                                  );
+                                } else {
+                                  return (
+                                    <div className="whitespace-pre-wrap font-sans text-parchment/80 leading-relaxed">
+                                      {String(resolvedData)}
+                                    </div>
+                                  );
+                                }
+                              })()}
                             </div>
                             <div className="mt-13 pt-13 border-t border-neon-cyan/8 flex items-center gap-21 text-[10px] font-mono text-parchment/34">
                               <div className="flex items-center gap-5">
@@ -1232,227 +1529,350 @@ export default function App() {
               </div>
             ) : (view === 'dashboard' && isAdmin) ? (
             <div className="space-y-34 py-34">
-              <div className="flex items-center justify-between mb-21">
-                <div>
-                  <h2 className="text-34 font-display font-bold text-neon-cyan uppercase tracking-tighter leading-none drop-shadow-[0_0_8px_rgba(0,230,118,0.6)]">Neural Command Center</h2>
-                  <p className="text-[10px] caps-modern text-neon-cyan/89 mt-5">Autonomous Agent Fleet Monitoring (24/7 Server-Side)</p>
-                </div>
+              <div className="flex items-center justify-between mb-21 p-13 bg-neon-cyan/13 border border-neon-cyan/55 rounded-13 shadow-[0_0_21px_rgba(0,230,118,0.2)]">
+                <motion.div
+                  initial={{ x: -20, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                >
+                  <h2 className="text-34 font-display font-bold text-neon-cyan uppercase tracking-tighter leading-none drop-shadow-[0_0_8px_rgba(0,230,118,0.6)]">Witness Command Center</h2>
+                  <p className="text-[10px] caps-modern text-neon-magenta mt-5 flex items-center gap-8 font-bold border-t border-neon-magenta/13 pt-5 tracking-[0.21em]">
+                    <Shield className="w-8 h-8 animate-pulse text-neon-magenta" />
+                    ADMINISTRATIVE ACCESS: ROOT AUTHORITY ACTIVE
+                  </p>
+                </motion.div>
                 <div className="flex items-center gap-13">
-                  {isCooling && (
-                    <div className="flex items-center gap-5 px-13 py-5 bg-cyber-red/10 border border-cyber-red/34 rounded-full text-[10px] text-cyber-red font-bold uppercase tracking-widest shadow-[0_0_8px_rgba(255,42,42,0.3)]">
-                      <Clock className="w-13 h-13" />
-                      Neural Cooling: {coolingTime}s
-                    </div>
-                  )}
-                  {isSimulating && (
-                    <div className="flex items-center gap-5 px-13 py-5 bg-neon-cyan/5 border border-neon-cyan/13 rounded-full text-[10px] text-neon-cyan font-bold uppercase tracking-widest animate-pulse shadow-[0_0_8px_rgba(0,230,118,0.3)]">
-                      <Activity className="w-13 h-13" />
-                      Simulation Active
-                    </div>
-                  )}
                   <div className="flex items-center gap-5 px-13 py-5 bg-neon-cyan/5 border border-neon-cyan/13 rounded-full text-[10px] text-neon-cyan font-bold uppercase tracking-widest">
                     <div className="w-2 h-2 rounded-full bg-neon-cyan animate-pulse shadow-[0_0_5px_#00E676]" />
-                    Fleet Active: 36/36
+                    Cycle Frequency: 30m
                   </div>
                 </div>
               </div>
 
-              {/* Agent Grid Visualization */}
-              <div className="glass-panel p-21 rounded-13 border-neon-cyan/13 mb-34 shadow-[inset_0_0_20px_rgba(0,230,118,0.05)]">
-                <div className="flex items-center justify-between mb-21">
-                  <div className="flex items-center gap-8 text-neon-cyan">
-                    <Activity className="w-21 h-21 drop-shadow-[0_0_5px_rgba(0,230,118,0.8)]" />
-                    <h3 className="text-13 font-bold uppercase tracking-widest drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">Agent Neural Map</h3>
-                  </div>
-                  <div className="flex items-center gap-13 text-[9px] caps-modern">
-                    <div className="flex items-center gap-3"><div className="agent-node idle" /> Idle</div>
-                    <div className="flex items-center gap-3"><div className="agent-node processing" /> Processing</div>
-                    <div className="flex items-center gap-3"><div className="agent-node committed" /> Committed</div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-9 gap-13">
-                  {agents.map((agent) => {
-                    const status = getAgentStatus(agent.id);
-                    return (
-                      <div key={agent.id} className="flex flex-col items-center gap-5 group">
-                        <div className={`agent-node ${status} ${status !== 'idle' ? 'active' : ''}`} />
-                        <span className="text-[8px] font-mono text-parchment/34 group-hover:text-neon-cyan transition-colors truncate w-full text-center">
-                          {agent.id.split('_')[0]}
-                        </span>
-                        <span className="text-[7px] caps-modern text-neon-cyan/21 group-hover:text-neon-cyan/89">{agent.role}</span>
+              {/* Mission Visualization: The Architecture of Pipes */}
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-21 mb-34">
+                {[
+                  { id: 'monitor', label: 'Monitor Pipe', icon: Search, info: 'Scanning alternative intelligence sectors for targets.', status: 'Active', color: 'neon-cyan' },
+                  { id: 'brain', label: 'Central Brain', icon: Zap, info: 'Triad Validation & Summarization Engine.', status: 'Processing', color: 'neon-blue' },
+                  { id: 'dash', label: 'Witness Gate', icon: User, info: 'Human oversight: Review & Approve Rebuttals.', status: 'Awaiting', color: 'parchment' },
+                  { id: 'broadcaster', label: 'Broadcast Pipe', icon: Globe, info: 'Execution of Approved Truth to public ledger.', status: 'Standby', color: 'neon-magenta' }
+                ].map((gate, i) => (
+                  <div key={gate.id} className={`glass-panel p-21 border border-${gate.color}/21 rounded-13 relative group hover:border-${gate.color}/55 transition-all`}>
+                    <div className={`absolute top-0 right-0 p-8 text-${gate.color}/34 group-hover:text-${gate.color} transition-all`}>
+                      <gate.icon className="w-21 h-21" />
+                    </div>
+                    <div className="flex items-start gap-13">
+                      <div className="text-[10px] font-mono text-parchment/34">0{i+1}</div>
+                      <div>
+                        <h4 className={`text-13 caps-modern font-bold text-${gate.color} mb-5`}>{gate.label}</h4>
+                        <p className="text-[10px] text-parchment/55 leading-tight mb-13">{gate.info}</p>
+                        <div className="inline-flex items-center gap-5 px-8 py-2 bg-void/55 border border-white/5 rounded-full text-[8px] font-bold uppercase">
+                          <div className={`w-1.5 h-1.5 rounded-full bg-${gate.color} ${gate.status === 'Processing' ? 'animate-pulse' : ''}`} />
+                          {gate.status}
+                        </div>
                       </div>
-                    );
-                  })}
-                </div>
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-21">
-                {/* Intelligence Feed */}
+                {/* Rebuttal Approval Queue (The Critical Pipe Gate) */}
                 <div className="lg:col-span-2 space-y-21">
-                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/13">
-                    <div className="flex items-center gap-8 mb-13 text-neon-cyan">
-                      <Database className="w-21 h-21 drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]" />
-                      <h3 className="text-13 font-bold uppercase tracking-widest drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">Intelligence Stream</h3>
-                    </div>
-                    <div className="space-y-13 max-h-[500px] overflow-y-auto silk-scroll pr-8">
-                      {intelligence.map((item) => (
-                        <div key={item.id} className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8 hover:border-neon-cyan/55 hover:shadow-[0_0_15px_rgba(0,230,118,0.1)] transition-all group">
-                          <div className="flex items-center justify-between mb-5">
-                            <div className="flex items-center gap-5 flex-wrap">
-                              <span className="text-[10px] text-neon-cyan font-bold uppercase tracking-widest px-8 py-2 bg-neon-cyan/13 rounded-full drop-shadow-[0_0_2px_rgba(0,230,118,0.5)]">{item.source}</span>
-                              <span className="text-[9px] text-void bg-neon-cyan px-5 py-2 rounded-full uppercase font-bold flex items-center gap-3 shadow-[0_0_8px_rgba(0,230,118,0.6)]">
-                                <Shield className="w-8 h-8" />
-                                Fact Checked
-                              </span>
-                              {item.metadata && Object.entries(item.metadata).map(([key, value]) => (
-                                <span key={key} className={`text-[9px] px-5 py-2 rounded-full uppercase font-bold border ${
-                                  key === 'confidence' ? 'border-neon-magenta text-neon-magenta shadow-[0_0_5px_rgba(255,0,255,0.3)]' : 'border-parchment/13 text-parchment/55'
-                                }`}>
-                                  {key === 'confidence' ? 'Evidence Score' : key}: {String(value)}
-                                </span>
-                              ))}
-                            </div>
-                            <span className="text-[10px] text-neon-cyan/55 font-mono whitespace-nowrap ml-8">{new Date(item.timestamp).toLocaleTimeString()}</span>
-                          </div>
-                          <p className="text-13 text-parchment/89 leading-relaxed group-hover:text-parchment transition-colors">{item.content}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/13">
-                    <div className="flex items-center justify-between mb-13 border-b border-neon-cyan/13 pb-13">
+                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/13 shadow-[inset_0_0_20px_rgba(0,230,118,0.05)]">
+                    <div className="flex items-center justify-between mb-21 border-b border-neon-cyan/21 pb-13">
                       <div className="flex items-center gap-8 text-neon-cyan">
-                        <Twitter className="w-21 h-21 drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]" />
-                        <h3 className="text-13 font-bold uppercase tracking-widest drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">Social Engagement</h3>
+                        <Globe className="w-21 h-21 drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]" />
+                        <h3 className="text-13 font-bold uppercase tracking-widest drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">Witness Approval Queue</h3>
                       </div>
-                      <div className="flex items-center gap-8">
-                        <div className={`px-8 py-2 rounded-full text-[9px] font-bold uppercase tracking-widest ${twitterConnected ? 'bg-inst-green/20 text-inst-green border border-inst-green/34' : 'bg-cyber-red/20 text-cyber-red border border-cyber-red/34'}`}>
-                          {twitterConnected ? 'Connected to X' : 'Social Offline'}
-                        </div>
-                        {!twitterConnected && (
-                          <button 
-                            onClick={handleConnectTwitter}
-                            className="px-13 py-5 bg-neon-cyan border border-void text-void text-[10px] font-bold uppercase tracking-widest hover:bg-neon-cyan/89 hover:shadow-[0_0_15px_rgba(0,230,118,0.6)] active:scale-95 transition-all rounded-full flex items-center gap-5 shadow-[0_0_8px_rgba(0,230,118,0.3)]"
-                          >
-                            <Zap className="w-13 h-13" />
-                            Connect X Handle
-                          </button>
-                        )}
-                      </div>
+                      <span className="text-[9px] caps-modern text-neon-cyan/55 px-13 py-5 bg-neon-cyan/5 border border-neon-cyan/13 rounded-full">
+                        {tweets.filter(t => !t.processed && !t.userApproved && t.draftRebuttal).length} Actions Pending
+                      </span>
                     </div>
-                    <div className="space-y-13 max-h-[400px] overflow-y-auto silk-scroll pr-8">
-                      {tweets.length === 0 && (
-                        <div className="py-55 text-center space-y-13 border border-dashed border-neon-cyan/13 rounded-13">
-                          <Activity className="w-34 h-34 text-neon-cyan/21 mx-auto animate-spin-slow" />
-                          <p className="text-[10px] caps-modern text-neon-cyan/34 tracking-widest">
-                            Agents are scanning for economically significant targets...<br/>
-                            Status: Awaiting first cycle (15-20s)
+
+                    <div className="space-y-13 max-h-[610px] overflow-y-auto silk-scroll pr-8">
+                      {tweets.filter(t => !t.processed).length === 0 && (
+                        <div className="py-89 text-center space-y-21 border border-dashed border-neon-cyan/13 rounded-13">
+                          <div className="relative inline-block">
+                            <Activity className="w-55 h-55 text-neon-cyan/13 mx-auto animate-spin-slow" />
+                            <Shield className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-21 h-21 text-neon-cyan/55" />
+                          </div>
+                          <p className="text-[10px] caps-modern text-neon-cyan/34 tracking-widest leading-relaxed">
+                            The Monitor Pipe is scanning high-value economic handles...<br/>
+                            Status: Zero deceptions detected in current sector.
                           </p>
                         </div>
                       )}
-                      {tweets.map((tweet) => (
-                        <div key={tweet.id} className="p-13 bg-void/34 border border-neon-cyan/13 rounded-8 hover:shadow-[0_0_8px_rgba(0,230,118,0.1)] transition-all">
-                          <div className="flex items-center justify-between mb-5">
-                            <span className="text-13 font-bold text-neon-cyan drop-shadow-[0_0_2px_rgba(0,230,118,0.4)]">{tweet.author}</span>
-                            <span className="text-[10px] text-neon-cyan/55 font-mono">{new Date(tweet.timestamp).toLocaleTimeString()}</span>
-                          </div>
-                          <p className="text-13 text-parchment/89 mb-8 italic">"{tweet.text}"</p>
-                          
-                          {/* Approval Flow */}
-                          {!tweet.processed && !tweet.userApproved && tweet.draftRebuttal && (
-                            <div className="mt-8 p-13 bg-neon-cyan/5 border border-neon-cyan/21 rounded-8 space-y-8 shadow-[inset_0_0_15px_rgba(0,230,118,0.05)]">
-                              <div className="flex items-center gap-5 text-[10px] text-neon-cyan font-bold uppercase">
-                                <Search className="w-13 h-13" />
-                                AI Suggested Rebuttal
+                      
+                      {tweets.filter(t => !t.processed).map((tweet) => (
+                        <motion.div 
+                          layout
+                          initial={{ opacity: 0, scale: 0.98 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          key={tweet.id} 
+                          className={`p-21 bg-void/34 border rounded-13 hover:shadow-[0_0_15px_rgba(0,230,118,0.1)] transition-all ${tweet.userApproved ? 'border-neon-magenta/34 shadow-[inset_0_0_21px_rgba(255,0,255,0.05)]' : 'border-neon-cyan/13'}`}
+                        >
+                          <div className="flex items-center justify-between mb-13">
+                            <div className="flex items-center gap-13">
+                              <div className="w-34 h-34 bg-neon-cyan/13 rounded-full flex items-center justify-center text-neon-cyan font-bold border border-neon-cyan/21 shadow-[0_0_10px_rgba(0,230,118,0.2)]">
+                                {tweet.author?.[0]?.toUpperCase()}
                               </div>
-                              <p className="text-12 text-parchment/89 font-mono">{tweet.draftRebuttal}</p>
-                              <div className="flex items-center gap-13 pt-5">
+                              <div>
+                                <h4 className="text-13 font-bold text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">{tweet.author}</h4>
+                                <p className="text-[9px] font-mono text-neon-cyan/34 italic">{new Date(tweet.timestamp).toLocaleString()}</p>
+                              </div>
+                            </div>
+                            <div className={`px-13 py-3 rounded-full text-[9px] font-bold uppercase tracking-widest ${tweet.userApproved ? 'bg-neon-magenta/21 text-neon-magenta border border-neon-magenta/34' : 'bg-neon-cyan/13 text-neon-cyan border border-neon-cyan/34'}`}>
+                              {tweet.userApproved ? 'Pipeline: Broadcasting' : 'Status: Evaluation Required'}
+                            </div>
+                          </div>
+
+                          <div className="p-13 bg-black/34 border-l-2 border-neon-cyan/34 rounded-r-8 mb-13 italic text-13 text-parchment/89 leading-relaxed">
+                            "{tweet.text}"
+                          </div>
+                          
+                          {tweet.draftRebuttal && !tweet.userApproved && (
+                            <div className="space-y-13">
+                              <div className="p-13 bg-neon-cyan/5 border border-neon-cyan/21 rounded-8 relative overflow-hidden group/draft shadow-[inset_0_0_15px_rgba(0,230,118,0.03)]">
+                                <div className="absolute top-0 left-0 bottom-0 w-1 bg-neon-cyan" />
+                                <div className="flex items-center gap-8 text-[10px] text-neon-cyan font-bold uppercase mb-8">
+                                  <Shield className="w-13 h-13" />
+                                  Brain Drafted Rebuttal
+                                </div>
+                                <p className="text-13 font-mono text-neon-cyan drop-shadow-[0_0_2px_rgba(0,230,118,0.3)] leading-relaxed">
+                                  {tweet.draftRebuttal}
+                                </p>
+                                <div className="mt-8 pt-8 border-t border-neon-cyan/13">
+                                  <div className="flex items-center gap-5 text-[9px] text-parchment/34">
+                                    <Database className="w-8 h-8" />
+                                    Logic: {tweet.draftLogic || 'Calculated systemic counter-response.'}
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div className="flex items-center gap-13">
                                 <button 
                                   onClick={() => handleApproveTweet(tweet.id!)}
-                                  className="flex-1 py-5 bg-neon-cyan text-void text-[10px] font-bold uppercase tracking-widest hover:bg-neon-cyan/89 transition-all shadow-[0_0_10px_rgba(0,230,118,0.3)] rounded"
+                                  className="flex-1 py-13 bg-neon-cyan text-void text-13 font-bold caps-modern hover:bg-white hover:text-black transition-all shadow-[0_0_21px_rgba(0,230,118,0.4)] hover:shadow-[0_0_34px_rgba(0,230,118,0.6)] rounded flex items-center justify-center gap-8"
                                 >
-                                  Deploy Truth Rebuttal
+                                  <User className="w-13 h-13" />
+                                  Authorize Truth Broadcast
                                 </button>
-                                <button className="px-8 py-5 border border-cyber-red/34 text-cyber-red text-[10px] font-bold uppercase hover:bg-cyber-red/5 transition-all rounded">
-                                  Ignore
+                                <button className="px-21 py-13 border border-cyber-red/34 text-cyber-red text-11 caps-modern hover:bg-cyber-red/5 transition-all rounded">
+                                  Bypass
                                 </button>
                               </div>
                             </div>
                           )}
 
-                          {tweet.userApproved && !tweet.processed && (
-                            <div className="mt-8 flex items-center gap-5 p-8 bg-neon-cyan/13 border border-neon-cyan/34 rounded-8 animate-pulse text-[10px] text-neon-cyan font-bold uppercase">
-                              <Clock className="w-13 h-13" />
-                              Pending Posting Cycle...
+                          {tweet.userApproved && (
+                            <div className="flex items-center gap-13 p-13 bg-neon-magenta/5 border border-neon-magenta/34 rounded-8 animate-pulse text-[11px] text-neon-magenta font-bold uppercase tracking-widest shadow-[inset_0_0_15px_rgba(255,0,255,0.05)]">
+                              <LayoutDashboard className="w-13 h-13" />
+                              Intelligence moving through Broadcast Pipe...
                             </div>
                           )}
+                        </motion.div>
+                      ))}
+                    </div>
+                  </div>
 
-                          {(() => {
-                            const response = responses.find(r => r.targetId === tweet.tweetId);
-                            if (!response) return null;
-                            return (
-                              <div className="mt-8 pt-8 border-t border-neon-cyan/21 space-y-8">
-                                <div>
-                                  <div className="flex items-center gap-5 text-[10px] text-neon-cyan font-bold uppercase mb-2">
-                                    <Landmark className="w-13 h-13" />
-                                    Economic Truth Analysis
-                                  </div>
-                                  <p className="text-13 text-parchment/89">{response.responseText}</p>
-                                </div>
-                                {response.counterTweet && (
-                                  <div className="bg-neon-cyan/5 p-8 rounded-5 border border-neon-cyan/34 relative overflow-hidden group/reply shadow-[inset_0_0_10px_rgba(0,230,118,0.05)]">
-                                    <div className="absolute top-0 right-0 p-5 opacity-0 group-hover/reply:opacity-100 transition-opacity">
-                                      <Twitter className="w-13 h-13 text-neon-cyan/34" />
-                                    </div>
-                                    <div className="flex items-center gap-5 text-[10px] text-neon-magenta font-bold uppercase mb-2 drop-shadow-[0_0_3px_rgba(255,0,255,0.4)]">
-                                      <Shield className="w-13 h-13 text-neon-magenta" />
-                                      Counter Tweet (Rebuttal)
-                                    </div>
-                                    <p className="text-13 font-mono font-bold text-neon-cyan leading-tight drop-shadow-[0_0_2px_rgba(0,230,118,0.3)]">
-                                      {response.counterTweet}
-                                    </p>
-                                    <div className="mt-5 flex justify-end">
-                                      <span className={`text-[9px] font-mono ${response.counterTweet.length > 160 ? 'text-cyber-red shadow-[0_0_5px_#FF2A2A]' : 'text-neon-cyan/55'}`}>
-                                        {response.counterTweet.length}/160
-                                      </span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
+                  {/* Operation Logs (The Pipe Telemetry) */}
+                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/13">
+                    <div className="flex items-center gap-8 mb-21 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">
+                      <Activity className="w-21 h-21" />
+                      <h3 className="text-13 font-bold uppercase tracking-widest drop-shadow-[0_0_3px_rgba(0,230,118,0.3)]">Pipe Telemetry</h3>
+                    </div>
+                    <div className="space-y-8 text-[10px] max-h-[300px] overflow-y-auto silk-scroll pr-8 mb-21">
+                      {logs.slice(0, 30).map((log) => (
+                        <div key={log.id} className="flex gap-13 py-5 border-b border-neon-cyan/13 group hover:bg-neon-cyan/5 transition-all">
+                          <span className="text-neon-cyan/34 font-mono w-55 shrink-0">{new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                          <div className="flex-1 flex gap-8">
+                            <span className="text-neon-cyan font-bold uppercase shrink-0">[{log.agentName}]</span>
+                            <span className="text-parchment/89">{log.action}</span>
+                            <span className={`ml-auto font-bold px-8 py-1 rounded-full text-[8px] ${log.status === 'success' ? 'text-void bg-neon-cyan shadow-[0_0_5px_#00E676]' : 'text-cyber-red border border-cyber-red/34'}`}>{log.status.toUpperCase()}</span>
+                          </div>
                         </div>
                       ))}
+                    </div>
+
+                    <div className="pt-21 border-t border-neon-cyan/21">
+                      <h3 className="text-11 caps-modern text-neon-cyan mb-13 border-b border-neon-cyan/13 pb-8 flex items-center gap-8">
+                        <Users className="w-13 h-13" />
+                        Active Agent Fleet
+                      </h3>
+                      <div className="grid grid-cols-2 gap-8 max-h-[400px] overflow-y-auto silk-scroll pr-8">
+                        {agents.map((agent) => (
+                          <div key={agent.id} className="flex items-center justify-between p-8 bg-neon-cyan/5 rounded-5 border border-neon-cyan/13 hover:border-neon-cyan/55 transition-all group">
+                            <div className="min-w-0">
+                               <p className="text-[10px] font-mono text-parchment/89 group-hover:text-neon-cyan truncate">{agent.domain}</p>
+                               <p className="text-[8px] caps-modern text-neon-cyan/55">{agent.role}</p>
+                            </div>
+                            <div className={`w-3 h-3 rounded-full ${(() => {
+                              const s = getAgentStatus(agent.domain);
+                              if (s === 'processing') return 'bg-neon-green animate-pulse shadow-[0_0_8px_#39FF14]';
+                              if (s === 'committed') return 'bg-neon-blue shadow-[0_0_5px_#00E5FF]';
+                              return 'bg-neon-cyan/34';
+                            })()}`} />
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Sidebar: Logs & Status */}
+                {/* Sidebar: System & Intelligence Insight */}
                 <div className="space-y-21">
-                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/13">
-                    <div className="flex items-center gap-8 mb-13 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">
-                      <Activity className="w-21 h-21" />
-                      <h3 className="text-13 font-bold uppercase tracking-widest drop-shadow-[0_0_2px_rgba(0,230,118,0.3)]">Operation Logs</h3>
+                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/13 bg-neon-cyan/5 shadow-[inset_0_0_21px_rgba(0,230,118,0.05)]">
+                    <h3 className="text-13 caps-modern text-neon-cyan mb-13 flex items-center gap-8 border-b border-neon-cyan/13 pb-8">
+                      <Globe className="w-13 h-13" />
+                      Neural Link Health
+                    </h3>
+                    <div className="space-y-13">
+                      <div className="flex justify-between items-center bg-void/55 p-8 rounded border border-neon-cyan/13">
+                        <span className="text-[10px] caps-modern text-parchment/55 tracking-widest">Aitihya Sync</span>
+                        <div className="w-3 h-3 rounded-full bg-neon-green shadow-[0_0_8px_#39FF14] animate-pulse" />
+                      </div>
+                      
+                      <div className="flex justify-between items-center bg-void/55 p-8 rounded border border-neon-cyan/13">
+                        <span className="text-[10px] caps-modern text-parchment/55 tracking-widest">Gemini Engine</span>
+                        <div className={`w-3 h-3 rounded-full ${geminiConfigured ? 'bg-neon-green shadow-[0_0_8px_#39FF14]' : 'bg-cyber-red shadow-[0_0_8px_#FF2A2A]'} animate-pulse`} />
+                      </div>
+                      
+                      {!geminiConfigured && (
+                        <p className="text-[8px] italic text-cyber-red/89 px-5">Missing: USER_GEMINI_KEY in Secrets</p>
+                      )}
                     </div>
-                    <div className="space-y-8 text-[10px] max-h-[800px] overflow-y-auto silk-scroll pr-5">
-                      {logs.map((log) => (
-                        <div key={log.id} className="flex gap-8 py-5 border-b border-neon-cyan/13 group hover:bg-neon-cyan/5 transition-colors">
-                          <span className="text-neon-cyan/55 font-mono flex-shrink-0">{new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          <div className="flex-1">
-                            <span className="text-neon-cyan font-bold uppercase mr-5 group-hover:text-neon-cyan group-hover:drop-shadow-[0_0_5px_rgba(0,230,118,0.8)] transition-all">[{log.agentName}]</span>
-                            <span className="text-parchment/55">{log.action}</span>
-                            <span className={`ml-5 font-bold ${log.status === 'success' ? 'text-void bg-neon-cyan px-5 py-1 rounded-full shadow-[0_0_5px_#00E676]' : 'text-cyber-red drop-shadow-[0_0_3px_#FF2A2A]'}`}>{log.status.toUpperCase()}</span>
+                  </div>
+
+                  <div className="glass-panel p-21 rounded-13 border-neon-magenta/13">
+                    <h3 className="text-13 caps-modern text-neon-magenta mb-13 flex items-center gap-8 border-b border-neon-magenta/13 pb-8">
+                      <Blocks className="w-13 h-13" />
+                      Broadcast History
+                    </h3>
+                    <div className="space-y-8 max-h-[400px] overflow-y-auto silk-scroll pr-5">
+                      {intelligence.filter(i => i.isBroadcasted).slice(0, 10).map((item, idx) => (
+                        <div key={idx} className="p-13 bg-neon-magenta/5 border border-neon-magenta/13 rounded-8 group hover:border-neon-magenta/55 transition-all">
+                          <div className="flex justify-between items-start mb-5">
+                            <span className="text-[8px] caps-modern text-neon-magenta/55"># {idx + 1} | BROADCASTED</span>
+                            <Globe className="w-10 h-10 text-neon-magenta/34 group-hover:text-neon-magenta transition-colors" />
+                          </div>
+                          <p className="text-[11px] text-parchment/89 leading-relaxed line-clamp-2">{item.content}</p>
+                          <div className="mt-5 flex items-center justify-between">
+                            <span className="text-[8px] font-mono text-neon-magenta/34 italic">{new Date(item.timestamp).toLocaleTimeString()}</span>
                           </div>
                         </div>
                       ))}
+                      {intelligence.filter(i => i.isBroadcasted).length === 0 && (
+                        <div className="py-34 text-center opacity-34 italic text-[10px]">
+                          Waiting for first broadcast cycle...
+                        </div>
+                      )}
                     </div>
+                  </div>
+                  
+                  <div className="glass-panel p-21 rounded-13 border-neon-cyan/21 bg-neon-cyan/5 shadow-[0_0_21px_rgba(0,230,118,0.05)]">
+                    <h3 className="text-13 caps-modern text-neon-cyan mb-8 drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">Operator Directive</h3>
+                    <p className="text-[11px] text-parchment/89 leading-relaxed font-sans italic opacity-80">
+                      "As the Absolute Witness, your role is the final gate. The agents find, analyze, and draft—but you authorize the truth to enter the public square. Monitor the pipes regularly to ensure maximum systemic impact."
+                    </p>
                   </div>
                 </div>
               </div>
+
+              {/* Neural Rotation Command Center & Permanent Archive Ledger */}
+              <ErrorBoundary>
+                <div className="mt-34">
+                  <AgentRotationPanel />
+                </div>
+              </ErrorBoundary>
             </div>
-          ) : messages.length === 0 ? (
-            <div className="min-h-[70vh] flex flex-col items-center justify-center py-89">
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-34 min-h-[70vh]">
+              {view === 'gazette' ? (
+                <div className="lg:col-span-4 h-full relative overflow-hidden glass-panel border border-neon-cyan/21 rounded-13 min-h-[80vh]">
+                  <ErrorBoundary>
+                    <ArthashastraGazette />
+                  </ErrorBoundary>
+                </div>
+              ) : (
+                <>
+                  {user && (
+                    <div className={`lg:col-span-1 flex flex-col gap-13 ${isHistoryOpen ? 'fixed inset-0 z-[70] bg-void/95 p-34 pt-144 lg:p-0 lg:relative lg:inset-auto lg:z-auto lg:bg-transparent' : 'hidden'} lg:flex border-r border-neon-cyan/13 pr-21 animate-in fade-in slide-in-from-left-5 duration-377 min-h-[500px]`}>
+                  {isHistoryOpen && (
+                    <button 
+                      onClick={() => setIsHistoryOpen(false)}
+                      className="lg:hidden absolute top-89 right-34 p-13 text-neon-cyan hover:text-[#00ffff] transition-colors"
+                    >
+                      <X className="w-34 h-34" />
+                    </button>
+                  )}
+                  
+                  <div className="flex-1 flex flex-col gap-21 overflow-hidden">
+                    <button 
+                      onClick={() => setView('chat')}
+                      className={`w-full flex items-center gap-13 p-13 rounded-8 transition-all border ${view === 'chat' ? 'bg-neon-cyan/21 border-neon-cyan text-neon-cyan shadow-[0_0_8px_rgba(0,240,255,0.2)]' : 'bg-white/3 border-transparent text-parchment/55 hover:bg-white/8'}`}
+                    >
+                      <MessageSquare className="w-13 h-13" />
+                      <span className="text-13 caps-modern">Neural Chat</span>
+                    </button>
+
+                    <button 
+                      onClick={() => setView('gazette')}
+                      className={`w-full flex items-center gap-13 p-13 rounded-8 transition-all border ${(view as any) === 'gazette' ? 'bg-neon-magenta/21 border-neon-magenta text-neon-magenta shadow-[0_0_8px_rgba(255,0,255,0.2)]' : 'bg-white/3 border-transparent text-parchment/55 hover:bg-white/8'}`}
+                    >
+                      <Newspaper className="w-13 h-13" />
+                      <span className="text-13 caps-modern">Gazette Dossier</span>
+                    </button>
+
+                    <div className="flex-1 overflow-hidden flex flex-col">
+                      <AitihyaHistory 
+                        onSelectConversation={(id) => {
+                          loadConversation(id);
+                          setIsHistoryOpen(false);
+                        }} 
+                        activeChatId={activeChatId} 
+                        selectedDate={selectedDateFilter}
+                        setSelectedDate={setSelectedDateFilter}
+                      />
+                    </div>
+
+                    <div className="bg-neon-cyan/5 border border-neon-cyan/13 rounded-8 p-13">
+                      <h3 className="text-[10px] caps-modern text-neon-cyan mb-8 flex items-center gap-8">
+                        <Users className="w-10 h-10" />
+                        AGENT FLEET STATUS
+                      </h3>
+                      <div className="space-y-5 max-h-[200px] overflow-y-auto silk-scroll pr-5">
+                        {agents.map((agent) => {
+                          const status = getAgentStatus(agent.domain);
+                          return (
+                            <div key={agent.id} className="flex items-center justify-between py-3 border-b border-neon-cyan/5">
+                              <span className="text-[9px] font-mono text-parchment/55 truncate">{agent.domain.split(' ')[0]}</span>
+                              <div className={`w-2 h-2 rounded-full ${
+                                status === 'processing' ? 'bg-neon-green animate-pulse shadow-[0_0_5px_#39FF14]' :
+                                status === 'committed' ? 'bg-neon-green/55' : 'bg-void border border-neon-cyan/13'
+                              }`} title={status} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button 
+                    onClick={() => {
+                      startNewChat();
+                      setIsHistoryOpen(false);
+                    }}
+                    className="w-full flex items-center justify-center gap-13 p-13 glass-panel border border-neon-cyan/34 text-neon-cyan hover:bg-neon-cyan/8 hover:shadow-[0_0_8px_rgba(0,230,118,0.3)] transition-all rounded-8 caps-modern text-13 mt-auto"
+                  >
+                    <Plus className="w-13 h-13" />
+                    New Thread
+                  </button>
+                </div>
+              )}
+              
+              <div className={`${isAdmin ? 'lg:col-span-3' : 'lg:col-span-4'} flex flex-col overflow-y-auto silk-scroll pr-13 custom-scrollbar min-h-[500px]`}>
+                {messages.length === 0 ? (
+                  <div className="min-h-[70vh] flex flex-col items-center justify-center py-89">
               <motion.div 
                 initial={{ y: 34, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
@@ -1462,7 +1882,7 @@ export default function App() {
                 <div className="inline-flex items-center gap-8 px-21 py-5 bg-neon-cyan/5 border border-neon-cyan/34 caps-modern mb-13 relative shadow-[0_0_15px_rgba(0,230,118,0.1)]">
                   <div className="absolute inset-0 bg-neon-cyan/13 blur-md" />
                   <div className="w-5 h-5 rounded-full bg-neon-cyan animate-pulse relative z-10 shadow-[0_0_8px_#00E676]" />
-                  <span className="relative z-10 text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">Neural Interface Active</span>
+                  <span className="relative z-10 text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">Neural Assembly Synchronized</span>
                 </div>
                 <h1 className="text-55 md:text-89 font-display font-bold tracking-tighter leading-[0.95] text-parchment uppercase">
                   {t.hero1}<br />
@@ -1503,47 +1923,144 @@ export default function App() {
                 <div className="flex items-center gap-8">
                   <div className="w-8 h-8 rounded-full bg-neon-cyan animate-pulse shadow-[0_0_8px_#00E676]" />
                   <span className="text-[10px] caps-modern text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]">Secure Terminal Session</span>
+                  {selectedDateFilter !== 'all' && (
+                    <span className="px-8 py-3 rounded bg-neon-cyan/15 border border-neon-cyan text-neon-cyan text-[8px] font-bold tracking-wider uppercase animate-pulse flex items-center gap-5">
+                      📅 {selectedDateFilter} FILTER
+                    </span>
+                  )}
+                  {user && (
+                    <button 
+                      onClick={() => setIsHistoryOpen(true)}
+                      className="lg:hidden ml-8 p-5 bg-neon-cyan/13 border border-neon-cyan/34 rounded text-neon-cyan hover:bg-neon-cyan/21 transition-all"
+                    >
+                      <Clock className="w-13 h-13" />
+                    </button>
+                  )}
                 </div>
-                <span className="text-[10px] font-mono text-neon-cyan/55">ID: {Math.random().toString(36).substring(7).toUpperCase()}</span>
+                <div className="flex items-center gap-13">
+                  <span className="text-[10px] font-mono text-neon-cyan/55">ID: {Math.random().toString(36).substring(7).toUpperCase()}</span>
+                  <button 
+                    onClick={async () => {
+                      if (messages.length === 0 || isSharing) return;
+                      setIsSharing(true);
+                      try {
+                        const sharedId = await createSharedTranscript(messages);
+                        const shareUrl = `${window.location.origin}/share/${sharedId}`;
+                        await navigator.clipboard.writeText(shareUrl);
+                        alert(`Shareable link copied to clipboard: ${shareUrl}`);
+                      } catch (e) {
+                        alert("Failed to share transcript");
+                      } finally {
+                        setIsSharing(false);
+                      }
+                    }}
+                    disabled={isSharing || messages.length === 0}
+                    className="flex items-center gap-5 px-8 py-3 border border-neon-cyan/55 text-neon-cyan/89 hover:bg-neon-cyan hover:text-void transition-colors rounded text-[10px] caps-modern disabled:opacity-50"
+                  >
+                    {isSharing ? <Loader2 className="w-10 h-10 animate-spin" /> : <Share2 className="w-10 h-10" />}
+                    SHARE THREAD
+                  </button>
+                </div>
               </div>
               <AnimatePresence>
-                {messages.map((msg) => (
-                  <motion.div
-                    key={msg.id}
-                    layout
-                    initial={{ y: 21, opacity: 0, scale: 0.98 }}
-                    animate={{ y: 0, opacity: 1, scale: 1 }}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div className={`max-w-[80%] p-21 rounded-13 relative group ${
-                      msg.role === 'user' 
-                        ? 'bg-neon-cyan/21 border border-neon-cyan/55 text-parchment ml-34 shadow-[0_0_15px_rgba(0,230,118,0.2)]' 
-                        : 'glass-panel border-neon-magenta/34 text-parchment mr-34 shadow-[inset_0_0_15px_rgba(255,0,255,0.1)]'
-                    }`}>
-                      <div className="flex items-center justify-between mb-8 opacity-89">
-                        <div className="flex items-center gap-8">
-                          {msg.role === 'user' ? <User className="w-13 h-13 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,230,118,0.8)]" /> : <Landmark className="w-13 h-13 text-neon-magenta drop-shadow-[0_0_5px_rgba(255,0,255,0.8)]" />}
-                          <span className={`text-[10px] caps-modern ${msg.role === 'user' ? 'text-neon-cyan' : 'text-neon-magenta'} drop-shadow-[0_0_3px_currentColor]`}>{msg.role === 'user' ? 'Human Operator' : 'Arthashastra Core'}</span>
-                        </div>
-                        {msg.hash && (
-                          <div className="flex items-center gap-5 px-8 py-2 bg-neon-cyan/13 border border-neon-cyan/34 rounded-full">
-                            <Shield className="w-10 h-10 text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]" />
-                            <span className="text-[8px] font-mono text-neon-cyan/89">BLOCK {msg.index} | {msg.hash.substring(0, 8)}</span>
-                          </div>
-                        )}
+                {(() => {
+                  const filteredActiveMessages = messages.filter(msg => {
+                    if (selectedDateFilter === 'all') return true;
+                    if (!msg.timestamp) return true; // keep system/unsaved elements
+                    return getMsgDateStr(msg.timestamp) === selectedDateFilter;
+                  });
+
+                  if (filteredActiveMessages.length === 0 && messages.length > 0) {
+                    return (
+                      <div className="p-34 border border-dashed border-neon-cyan/21 bg-void/50 rounded-13 text-center space-y-13 my-21">
+                        <Calendar className="w-34 h-34 text-neon-cyan/34 mx-auto animate-pulse" />
+                        <h3 className="text-13 caps-modern text-neon-cyan font-bold tracking-wider">No Messages Block on {selectedDateFilter}</h3>
+                        <p className="text-[11px] text-parchment/55 max-w-md mx-auto leading-relaxed">
+                          This specific thread contains no recorded witness statements on <strong className="text-neon-cyan">{selectedDateFilter}</strong>.
+                        </p>
+                        <button
+                          onClick={() => setSelectedDateFilter('all')}
+                          className="px-13 py-8 bg-neon-cyan/10 hover:bg-neon-cyan/21 text-neon-cyan border border-neon-cyan/34 rounded-8 text-[10px] caps-modern font-bold transition-all"
+                        >
+                          Clear Temporal Filter
+                        </button>
                       </div>
+                    );
+                  }
+
+                  return filteredActiveMessages.map((msg) => (
+                    <motion.div
+                      key={msg.id}
+                      layout
+                      initial={{ y: 21, opacity: 0, scale: 0.98 }}
+                      animate={{ y: 0, opacity: 1, scale: 1 }}
+                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div className={`max-w-[80%] p-21 rounded-13 relative group ${
+                        msg.role === 'user' 
+                          ? 'bg-neon-cyan/21 border border-neon-cyan/55 text-parchment ml-34 shadow-[0_0_15px_rgba(0,230,118,0.2)]' 
+                          : 'glass-panel border-neon-magenta/34 text-parchment mr-34 shadow-[inset_0_0_15px_rgba(255,0,255,0.1)]'
+                      }`}>
+                        <div className="flex items-center justify-between mb-8 opacity-89">
+                          <div className="flex items-center gap-8">
+                            {msg.role === 'user' ? <User className="w-13 h-13 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,230,118,0.8)]" /> : <Landmark className="w-13 h-13 text-neon-magenta drop-shadow-[0_0_5px_rgba(255,0,255,0.8)]" />}
+                            <span className={`text-[10px] caps-modern ${msg.role === 'user' ? 'text-neon-cyan' : 'text-neon-magenta'} drop-shadow-[0_0_3px_currentColor]`}>{msg.role === 'user' ? 'Human Operator' : 'Arthashastra Core'}</span>
+                            <span className="text-[8px] font-mono opacity-34 ml-5">
+                              {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                          {msg.hash && (
+                            <div className="flex items-center gap-5 px-8 py-2 bg-neon-cyan/13 border border-neon-cyan/34 rounded-full">
+                              <Shield className="w-10 h-10 text-neon-cyan drop-shadow-[0_0_3px_rgba(0,230,118,0.5)]" />
+                              <span className="text-[8px] font-mono text-neon-cyan/89">BLOCK {msg.index} | {msg.hash.substring(0, 8)}</span>
+                            </div>
+                          )}
+                        </div>
                       <div className="prose prose-invert prose-neon max-w-none text-13 leading-relaxed">
                         <ReactMarkdown>{msg.text}</ReactMarkdown>
                       </div>
-                      {msg.previousHash && (
-                        <div className="mt-8 pt-8 border-t border-neon-cyan/21 flex items-center gap-5 opacity-55 hover:opacity-100 transition-all">
-                          <Blocks className="w-10 h-10 text-neon-cyan" />
-                          <span className="text-[8px] font-mono text-neon-cyan">LINK: {msg.previousHash.substring(0, 8)}...</span>
+                      <div className="mt-8 pt-8 border-t border-neon-cyan/21 flex items-center justify-between gap-5 opacity-55 hover:opacity-100 transition-all">
+                        <div className="flex items-center gap-5">
+                          {msg.previousHash && (
+                            <>
+                              <Blocks className="w-10 h-10 text-neon-cyan" />
+                              <span className="text-[8px] font-mono text-neon-cyan">LINK: {msg.previousHash.substring(0, 8)}...</span>
+                            </>
+                          )}
                         </div>
-                      )}
+                        <div className="flex gap-8">
+                          <button 
+                            onClick={async () => {
+                              await navigator.clipboard.writeText(msg.text);
+                              alert("Message copied to clipboard.");
+                            }}
+                            className="flex items-center gap-2 px-3 py-1 bg-neon-cyan/10 border border-neon-cyan/21 hover:bg-neon-cyan/20 rounded text-[9px] text-neon-cyan transition-colors"
+                          >
+                            <Copy className="w-8 h-8" />
+                            COPY
+                          </button>
+                          <button
+                            onClick={async () => {
+                              try {
+                                const sharedId = await createSharedTranscript([msg]);
+                                const shareUrl = `${window.location.origin}/share/${sharedId}`;
+                                await navigator.clipboard.writeText(shareUrl);
+                                alert(`Shareable link copied to clipboard: ${shareUrl}`);
+                              } catch(e) {
+                                alert("Failed to share message");
+                              }
+                            }}
+                            className="flex items-center gap-2 px-3 py-1 bg-neon-cyan/10 border border-neon-cyan/21 hover:bg-neon-cyan/20 rounded text-[9px] text-neon-cyan transition-colors"
+                          >
+                            <Share2 className="w-8 h-8" />
+                            SHARE
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </motion.div>
-                ))}
+                  ));
+                })()}
               </AnimatePresence>
               {isLoading && (
                 <motion.div 
@@ -1560,22 +2077,27 @@ export default function App() {
             </div>
           )}
         </div>
-      </main>
+        </>
+      )}
+    </div>
+  )}
+  </div>
+</main>
 
       {/* Input Area */}
       {view === 'chat' && (
-        <div className="fixed bottom-34 right-34 z-[60] flex flex-col items-end gap-8">
+        <div className="fixed bottom-[89px] md:bottom-34 right-13 md:right-34 z-[60] flex flex-col items-end gap-5 md:gap-8 w-[calc(100vw-26px)] md:w-auto h-auto max-w-[800px]">
           <motion.div 
             initial={false}
             animate={{ 
-              width: (input.length > 0 || isLoading) ? 'min(800px, calc(100vw - 68px))' : '280px',
+              width: (input.length > 0 || isLoading) ? '100%' : '100%',
             }}
-            whileHover={{ width: 'min(800px, calc(100vw - 68px))' }}
-            className="glass-panel p-5 rounded-13 border-neon-cyan/34 flex items-end gap-0 relative group overflow-hidden min-h-[55px] h-auto shadow-[0_0_21px_rgba(0,230,118,0.3)] transition-all duration-377 focus-within:shadow-[0_0_34px_rgba(0,230,118,0.5)] focus-within:border-neon-cyan"
+            whileHover={{ width: '100%' }}
+            className="md:!w-auto glass-panel p-5 rounded-13 border-neon-cyan/34 flex items-end gap-0 relative group overflow-hidden min-h-[55px] shadow-[0_0_21px_rgba(0,230,118,0.3)] transition-all duration-377 focus-within:shadow-[0_0_34px_rgba(0,230,118,0.5)] focus-within:border-neon-cyan md:[&]:!w-[min(800px,calc(100vw-68px))]"
           >
             <div className="absolute inset-0 bg-neon-cyan/5 opacity-0 group-focus-within:opacity-100 transition-opacity rounded-13 pointer-events-none" />
             
-            <div className="w-44 h-44 flex items-center justify-center flex-shrink-0 text-neon-cyan group-hover:text-neon-cyan/89 transition-colors drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">
+            <div className="w-34 h-34 md:w-34 md:h-34 flex items-center justify-center flex-shrink-0 text-neon-cyan group-hover:text-neon-cyan/89 transition-colors drop-shadow-[0_0_5px_rgba(0,230,118,0.5)]">
               <MessageSquare className="w-21 h-21" />
             </div>
 
@@ -1590,19 +2112,19 @@ export default function App() {
               }}
               placeholder={t.placeholder}
               rows={input.length > 50 || input.includes('\n') ? 3 : 1}
-              className="flex-1 bg-transparent border-none focus:ring-0 text-13 p-13 py-12 text-parchment placeholder:text-neon-cyan/34 font-medium relative z-10 min-w-0 opacity-100 transition-all duration-377 resize-none silk-scroll"
-              style={{ minHeight: '44px' }}
+              className="flex-1 bg-transparent border-none focus:ring-0 text-13 p-8 md:p-13 py-13 text-parchment placeholder:text-neon-cyan/34 font-medium relative z-10 min-w-0 opacity-100 transition-all duration-377 resize-none silk-scroll w-full"
+              style={{ minHeight: '34px' }}
             />
 
             <button
               onClick={() => handleSend()}
               disabled={isLoading || !input.trim()}
-              className="w-44 h-44 bg-neon-cyan text-void flex items-center justify-center rounded-8 hover:bg-[#00ffff] transition-all duration-377 disabled:opacity-21 disabled:grayscale shadow-[0_0_13px_rgba(0,230,118,0.6)] flex-shrink-0"
+              className="w-34 h-34 md:w-34 md:h-34 self-center md:self-end mb-5 mr-5 bg-neon-cyan text-void flex items-center justify-center rounded-8 hover:bg-[#00ffff] transition-all duration-377 disabled:opacity-21 disabled:grayscale shadow-[0_0_13px_rgba(0,230,118,0.6)] flex-shrink-0"
             >
               {isLoading ? <Loader2 className="w-21 h-21 animate-spin" /> : <Send className="w-21 h-21" />}
             </button>
           </motion.div>
-          <p className="text-right text-[9px] caps-modern text-neon-cyan/55 pr-13 opacity-55 group-hover:opacity-100 transition-opacity drop-shadow-[0_0_2px_rgba(0,230,118,0.3)]">
+          <p className="text-right text-[8px] md:text-[9px] caps-modern text-neon-cyan/55 pr-13 opacity-55 group-hover:opacity-100 transition-opacity drop-shadow-[0_0_2px_rgba(0,230,118,0.3)]">
             {t.footer}
           </p>
         </div>

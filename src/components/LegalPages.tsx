@@ -109,7 +109,7 @@ export const PrivacyPage: React.FC = () => {
         <main className="glass-panel p-34 border border-neon-magenta/8 bg-neon-magenta/[0.02]">
           <LegalSection title="01. Identification Logic">
             <p>
-              When you identify via Google, X, or Anonymous paths, we collect only the minimal cryptographic hash required 
+              When you identify via Google or Anonymous paths, we collect only the minimal cryptographic hash required 
               to bind your session to your data sector. We do not "scrape" your external identity; we only recognize the 
               token that proves your ownership of the Witness Sector.
             </p>
@@ -125,8 +125,8 @@ export const PrivacyPage: React.FC = () => {
 
           <LegalSection title="03. Third-Party Protocols">
             <p>
-              Interactions with the X API are handled through secure proxies. Your identity tokens are never stored 
-              in plain text. We use these links solely to verify your Witness status and to provide the X Terminal 
+              Interactions with third-party verification protocols are handled through secure proxies. Your identity tokens are never stored 
+              in plain text. We use these links solely to verify your Witness status and to provide the necessary 
               login capability.
             </p>
           </LegalSection>
