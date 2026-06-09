@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/run-cycle",
-      "schedule": "0 * * * *"
+      "schedule": "0 0 * * *"
     }
   ],
   "rewrites": [
