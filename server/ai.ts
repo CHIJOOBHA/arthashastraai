@@ -190,7 +190,12 @@ function aiUnavailable(err: unknown): HttpError {
 /** Extracts the first JSON array/object from model text. Returns null if none. */
 export function extractJson<T = unknown>(text: string): T | null {
   const cleaned = text.replace(/```(?:json)?/gi, "");
-  for (const [open, close] of [["[", "]"], ["{", "}"]] as const) {
+  // Use whichever JSON shape starts first, so an object containing an array is returned whole.
+  const firstArr = cleaned.indexOf("[");
+  const firstObj = cleaned.indexOf("{");
+  const order: Array<[string, string]> =
+    firstObj !== -1 && (firstArr === -1 || firstObj < firstArr) ? [["{", "}"], ["[", "]"]] : [["[", "]"], ["{", "}"]];
+  for (const [open, close] of order) {
     const start = cleaned.indexOf(open);
     const end = cleaned.lastIndexOf(close);
     if (start !== -1 && end > start) {

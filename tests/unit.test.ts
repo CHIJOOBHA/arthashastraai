@@ -110,6 +110,7 @@ test("extractJson finds arrays and objects inside model text", () => {
   assert.deepEqual(extractJson('Here:\n```json\n[{"a":1}]\n```'), [{ a: 1 }]);
   assert.deepEqual(extractJson('noise {"b":2} tail'), { b: 2 });
   assert.equal(extractJson("no json here"), null);
+  assert.deepEqual(extractJson('{"headline":"h","stories":[{"t":1}]}'), { headline: "h", stories: [{ t: 1 }] });
 });
 
 test("sourcesMarkdown lists sources and warns when there are none", () => {

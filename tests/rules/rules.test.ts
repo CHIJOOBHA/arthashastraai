@@ -84,15 +84,16 @@ test("cannot post AI ('model') messages in a debate", { skip }, async () => {
 });
 
 test("likes: exactly +1, once per user, with the like document", { skip }, async () => {
-  await assertFails(updateDoc(doc(bob(), "debates/d1"), { likesCount: 999 }));
-  await assertFails(updateDoc(doc(bob(), "debates/d1"), { likesCount: increment(1) }));
-  const b = writeBatch(bob());
-  b.set(doc(bob(), "debates/d1/likes/bob"), { createdAt: serverTimestamp() });
-  b.update(doc(bob(), "debates/d1"), { likesCount: increment(1) });
+  const db = bob();
+  await assertFails(updateDoc(doc(db, "debates/d1"), { likesCount: 999 }));
+  await assertFails(updateDoc(doc(db, "debates/d1"), { likesCount: increment(1) }));
+  const b = writeBatch(db);
+  b.set(doc(db, "debates/d1/likes/bob"), { createdAt: serverTimestamp() });
+  b.update(doc(db, "debates/d1"), { likesCount: increment(1) });
   await assertSucceeds(b.commit());
-  const again = writeBatch(bob());
-  again.set(doc(bob(), "debates/d1/likes/bob"), { createdAt: serverTimestamp() });
-  again.update(doc(bob(), "debates/d1"), { likesCount: increment(1) });
+  const again = writeBatch(db);
+  again.set(doc(db, "debates/d1/likes/bob"), { createdAt: serverTimestamp() });
+  again.update(doc(db, "debates/d1"), { likesCount: increment(1) });
   await assertFails(again.commit());
 });
 
