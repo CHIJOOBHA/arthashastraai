@@ -24,7 +24,8 @@ export class HttpError extends Error {
   }
 }
 
-async function decode(req: Request): Promise<AuthedUser | null> {
+/** Returns the signed-in user for this request, or null. */
+export async function decode(req: Request): Promise<AuthedUser | null> {
   const header = req.headers.authorization || "";
   if (!header.startsWith("Bearer ")) return null;
   const token = header.slice(7).trim();
@@ -74,6 +75,21 @@ export async function isSubscribed(uid: string): Promise<boolean> {
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+/** Gives back quota when the AI failed before answering, so users are not charged for errors. */
+export async function refundQuota(user: AuthedUser, cost = 1): Promise<void> {
+  if (user.isAdmin) return;
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db
+      .collection("usage")
+      .doc(`${user.uid}_${today()}`)
+      .update({ count: FieldValue.increment(-cost) });
+  } catch {
+    /* best effort */
+  }
+}
 
 /**
  * Atomically counts one AI request against the user's daily limit.

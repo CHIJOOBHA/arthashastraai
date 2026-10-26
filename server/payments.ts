@@ -16,7 +16,13 @@ import { appendBlock } from "./ledger.js";
 let rzp: Razorpay | null = null;
 export const paymentsConfigured = () => !!(config.razorpay.keyId && config.razorpay.keySecret);
 
+/** Test hook: inject a fake Razorpay client. */
+export function __setRazorpayForTests(fake: unknown) {
+  rzp = fake as Razorpay;
+}
+
 function client(): Razorpay {
+  if (rzp) return rzp;
   if (!paymentsConfigured()) {
     throw new HttpError(503, "PAYMENTS_UNCONFIGURED", "Payments are not set up yet.");
   }

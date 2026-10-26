@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+server-dist/
+dev-dist/
+.firebase/
+*-debug.log
+firebase-applet-config.json
