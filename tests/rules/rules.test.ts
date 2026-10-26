@@ -24,7 +24,7 @@ const admin = () => env.authenticatedContext("boss", { admin: true, firebase: { 
 before(async () => {
   if (skip) return;
   env = await initializeTestEnvironment({
-    projectId: "demo-arthashastra",
+    projectId: "demo-arthashastra-rules", // separate from the integration tests
     firestore: { rules: readFileSync("firestore.rules", "utf8") },
   });
 });

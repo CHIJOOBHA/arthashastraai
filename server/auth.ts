@@ -140,7 +140,9 @@ export async function consumeQuota(user: AuthedUser, cost = 1): Promise<{ used: 
 const hits = new Map<string, number[]>();
 export function burstLimit(maxPerMinute: number) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const key = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    // Separate bucket per route, so heavy chat use does not block other features.
+    const key = `${req.baseUrl}${req.path}|${ip}`;
     const now = Date.now();
     const recent = (hits.get(key) || []).filter((t) => now - t < 60_000);
     if (recent.length >= maxPerMinute) {
