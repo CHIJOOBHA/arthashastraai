@@ -20,26 +20,29 @@ import {
   getDocsFromCache,
   enableIndexedDbPersistence
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+// Configuration comes from VITE_FIREBASE_* environment variables.
+// AI Studio's firebase-applet-config.json is used only if it exists (it is optional,
+// so a missing file no longer breaks the build).
+const appletFiles = import.meta.glob('../../firebase-applet-config.json', { eager: true, import: 'default' }) as Record<string, Record<string, string>>;
+const firebaseConfig: Record<string, string | undefined> = Object.values(appletFiles)[0] || {};
 
-// Merged configuration with placeholder detection.
-const isPlaceholder = (val: string | undefined) => !val || val.includes('MY_FIREBASE') || val === '';
+const isPlaceholder = (val: string | undefined) => !val || val.includes('MY_FIREBASE') || val.trim() === '';
+const pick = (fileVal: string | undefined, envVal: string | undefined) => (!isPlaceholder(envVal) ? envVal : !isPlaceholder(fileVal) ? fileVal : undefined);
 
 const finalConfig = {
-  apiKey: !isPlaceholder(firebaseConfig.apiKey) ? firebaseConfig.apiKey : import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: !isPlaceholder(firebaseConfig.authDomain) ? firebaseConfig.authDomain : import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: !isPlaceholder(firebaseConfig.projectId) ? firebaseConfig.projectId : (import.meta.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0592321618"),
-  storageBucket: !isPlaceholder(firebaseConfig.storageBucket) ? firebaseConfig.storageBucket : import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: !isPlaceholder(firebaseConfig.messagingSenderId) ? firebaseConfig.messagingSenderId : import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: !isPlaceholder(firebaseConfig.appId) ? firebaseConfig.appId : import.meta.env.VITE_FIREBASE_APP_ID,
-  firestoreDatabaseId: !isPlaceholder(firebaseConfig.firestoreDatabaseId) ? firebaseConfig.firestoreDatabaseId : import.meta.env.VITE_FIREBASE_DATABASE_ID
+  apiKey: pick(firebaseConfig.apiKey, import.meta.env.VITE_FIREBASE_API_KEY),
+  authDomain: pick(firebaseConfig.authDomain, import.meta.env.VITE_FIREBASE_AUTH_DOMAIN),
+  projectId: pick(firebaseConfig.projectId, import.meta.env.VITE_FIREBASE_PROJECT_ID),
+  storageBucket: pick(firebaseConfig.storageBucket, import.meta.env.VITE_FIREBASE_STORAGE_BUCKET),
+  messagingSenderId: pick(firebaseConfig.messagingSenderId, import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID),
+  appId: pick(firebaseConfig.appId, import.meta.env.VITE_FIREBASE_APP_ID),
+  firestoreDatabaseId: pick(firebaseConfig.firestoreDatabaseId, import.meta.env.VITE_FIREBASE_DATABASE_ID)
 };
 
-console.log('[Firebase] Neural Link Config:', {
-  project: finalConfig.projectId,
-  database: finalConfig.firestoreDatabaseId || '(default)',
-  isPlaceholder: isPlaceholder(finalConfig.projectId)
-});
+export const firebaseConfigured = !isPlaceholder(finalConfig.projectId) && !isPlaceholder(finalConfig.apiKey);
+if (!firebaseConfigured) {
+  console.warn('[Firebase] Not configured: set the VITE_FIREBASE_* environment variables.');
+}
 
 // Automatic project ID detection for AI Studio
 // In most cases, we should trust the provisioned firebase-applet-config.json.
@@ -216,6 +219,23 @@ export const signInAnonymous = () => {
   return signInAnonymously(auth);
 };
 export const signOut = () => auth.signOut();
+
+/** Authorization header for calls to our own server. Every AI endpoint requires it. */
+export async function authHeaders(): Promise<Record<string, string>> {
+  const u = auth.currentUser;
+  if (!u) throw new Error('AUTH_REQUIRED');
+  return { Authorization: `Bearer ${await u.getIdToken()}` };
+}
+
+/** Converts Firestore Timestamps, ISO strings, millis or Dates into a Date (or null). */
+export function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if (typeof value.toDate === 'function') return value.toDate();
+  if (typeof value.seconds === 'number') return new Date(value.seconds * 1000);
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+}
 
 // Error Handling
 export enum OperationType {
