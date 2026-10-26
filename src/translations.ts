@@ -103,7 +103,8 @@ const en = {
   noMessagesOnDate: 'No messages in this conversation on {date}.',
   clearFilter: 'Clear date filter',
   hashChained: 'hash-chained',
-  hashChainedNote: 'Each saved message stores a SHA-256 hash linked to the previous one, so later edits are detectable. This is a tamper-evident log, not encryption and not a blockchain.',
+  hashChainedNote:
+    'Each saved message stores a SHA-256 hash linked to the previous message’s hash, so removed or reordered messages are detectable. It is not encryption and not a blockchain.',
   loadHistoryFailed: 'Could not load this conversation. Please try again.',
   errSignInRequired: 'Please sign in with Google to continue.',
   seePlans: 'See plans',
@@ -166,6 +167,36 @@ const en = {
   privateArchive: 'Private archive',
   privateArchiveBody:
     'Your conversations are saved in your account and only you can read them, unless you share one. Each message is hash-chained to the previous one, which makes later edits detectable.',
+
+  // Admin
+  healthTitle: 'Server health',
+  healthAi: 'AI (Gemini key)',
+  healthDb: 'Database (Firebase Admin)',
+  healthPayments: 'Payments (Razorpay)',
+  healthOk: 'OK',
+  healthMissing: 'Missing',
+  healthUnconfigured: 'Server not fully configured',
+  healthWarn: 'Server partly configured',
+  healthMissingKeys: 'Missing server settings:',
+  runAgents: 'Run agents now',
+  runAgentsBusy: 'Agents running (can take ~4 min)…',
+  runAgentsDone: 'Agent cycle finished',
+  runAgentsResult: 'Desks run: {ran}\nStories published: {published}',
+  schedule: 'Automatic run: once a day at 01:30 UTC (server cron). You can also start a run manually.',
+  agentLogs: 'Agent activity log',
+  agentLogsEmpty: 'No agent activity recorded yet.',
+  todaysRotation: 'Today’s desk rotation',
+  lastActivity: 'Last activity',
+  never: 'none yet',
+  recentlyPublished: 'Recently published',
+  feedStats: 'Feed summary',
+  storiesLoaded: 'Stories shown',
+  bySeverity: 'By severity',
+  byCategory: 'By desk',
+
+  // Errors
+  tryAgain: 'Try again',
+  errorBody: 'This part of the page failed to load. Your data is safe. Try again, or reload the page.',
 
   // Generic
   cancel: 'Cancel',

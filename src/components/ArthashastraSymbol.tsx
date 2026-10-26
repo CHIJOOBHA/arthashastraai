@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { motion } from 'motion/react';
 
 interface ArthashastraSymbolProps {
@@ -6,9 +6,20 @@ interface ArthashastraSymbolProps {
   size?: number;
 }
 
-export const ArthashastraSymbol: React.FC<ArthashastraSymbolProps> = ({ className, size = 100 }) => {
+export const ArthashastraSymbol: React.FC<ArthashastraSymbolProps> = ({ className = '', size = 100 }) => {
+  // Stable per-particle timings (computed once, not on every render).
+  const particles = useMemo(
+    () =>
+      Array.from({ length: 6 }, (_, i) => ({
+        x: Math.cos((i * 60 * Math.PI) / 180) * (size / 2),
+        y: Math.sin((i * 60 * Math.PI) / 180) * (size / 2),
+        duration: 2 + ((i * 37) % 10) / 10,
+      })),
+    [size],
+  );
+
   return (
-    <div className={`relative flex items-center justify-center ${className}`} style={{ width: size, height: size }}>
+    <div className={`relative flex items-center justify-center ${className}`.trim()} style={{ width: size, height: size }} aria-hidden="true">
       {/* Outer Rotating Halo - The Macro-Economic Spheres */}
       <motion.div
         animate={{ rotate: 360 }}
@@ -44,7 +55,7 @@ export const ArthashastraSymbol: React.FC<ArthashastraSymbolProps> = ({ classNam
         <line x1="11" y1="27.5" x2="89" y2="72.5" stroke="#00F0FF" strokeWidth="0.2" className="opacity-21" />
         <line x1="89" y1="27.5" x2="11" y2="72.5" stroke="#00F0FF" strokeWidth="0.2" className="opacity-21" />
         
-        {/* The Central Hub - The Eye of Absolute Truth */}
+        {/* The Central Hub - The central eye */}
         <motion.circle
           cx="50" cy="50" r="8"
           fill="#FF00FF"
@@ -72,18 +83,18 @@ export const ArthashastraSymbol: React.FC<ArthashastraSymbolProps> = ({ classNam
       </motion.svg>
 
       {/* Floating Particles - The Economic Signals */}
-      {[...Array(6)].map((_, i) => (
+      {particles.map((p, i) => (
         <motion.div
           key={i}
           className="absolute w-1 h-1 bg-neon-cyan rounded-full shadow-[0_0_5px_#00F0FF]"
           animate={{
-            x: [0, Math.cos(i * 60 * Math.PI / 180) * (size/2)],
-            y: [0, Math.sin(i * 60 * Math.PI / 180) * (size/2)],
+            x: [0, p.x],
+            y: [0, p.y],
             opacity: [0, 1, 0],
             scale: [0, 1.5, 0]
           }}
           transition={{
-            duration: 2 + Math.random(),
+            duration: p.duration,
             repeat: Infinity,
             delay: i * 0.5,
             ease: "easeOut"
