@@ -73,8 +73,8 @@ export function createApp() {
   app.use(express.json({ limit: "200kb" }));
 
   // ---------- health (public, no internals) ----------
-  app.get("/api/health", (_req, res) => {
-    const fb = firebaseStatus();
+  app.get("/api/health", route(async (_req, res) => {
+    const fb = await firebaseStatus();
     const ai = aiConfigured();
     res.json({
       status: ai && fb.ready ? "active" : ai ? "warn" : "unconfigured",
@@ -84,7 +84,7 @@ export function createApp() {
       paymentsConfigured: paymentsConfigured(),
       missingKeys: [...(ai ? [] : ["GEMINI_API_KEY"]), ...(fb.ready ? [] : ["FIREBASE_SERVICE_ACCOUNT"])],
     });
-  });
+  }));
 
   // ---------- my account ----------
   app.get(

@@ -73,10 +73,31 @@ export function getAdminAuth(): admin.auth.Auth | null {
   return admin.apps.length ? admin.auth() : null;
 }
 
-export function firebaseStatus() {
+let probe: { ok: boolean; at: number } | null = null;
+
+/** Real connectivity check (cached for 60 s): can we actually read from Firestore? */
+async function canReach(): Promise<boolean> {
+  if (probe && Date.now() - probe.at < 60_000) return probe.ok;
+  const d = getDb();
+  let ok = false;
+  if (d) {
+    try {
+      await Promise.race([
+        d.collection("system").doc("health").get(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 4000)),
+      ]);
+      ok = true;
+    } catch (e) {
+      initError = (e as Error).message.slice(0, 200);
+    }
+  }
+  probe = { ok, at: Date.now() };
+  return ok;
+}
+
+export async function firebaseStatus() {
   return {
-    ready: !!getDb(),
+    ready: await canReach(),
     databaseId: config.firebase.databaseId,
-    error: initError || undefined,
   };
 }

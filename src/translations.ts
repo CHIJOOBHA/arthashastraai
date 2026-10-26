@@ -71,6 +71,7 @@ const en = {
   signInBlockedBody: 'Sign-in does not work inside this preview window. Open Arthashastra in a new tab to sign in?',
   terms: 'Terms',
   privacy: 'Privacy',
+  refunds: 'Refunds',
   signOut: 'Sign out',
   language: 'Language',
   install: 'Install app',

@@ -7,6 +7,7 @@
  */
 import "dotenv/config";
 import path from "path";
+import fs from "fs";
 import express from "express";
 import { createApp } from "./server/app.js";
 import { config } from "./server/config.js";
@@ -23,6 +24,14 @@ async function main() {
     app.use(vite.middlewares);
   } else {
     const dist = path.resolve(process.cwd(), "dist");
+    // Same security headers as on Vercel (single source of truth: vercel.json).
+    try {
+      const vercel = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "vercel.json"), "utf8"));
+      const global = (vercel.headers || []).find((h: any) => h.source === "/(.*)");
+      if (global) app.use((_req, res, next) => (global.headers.forEach((h: any) => res.setHeader(h.key, h.value)), next()));
+    } catch {
+      /* vercel.json missing: run without extra headers */
+    }
     app.use(express.static(dist, { index: false, maxAge: "1h" }));
     app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
   }
