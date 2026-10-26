@@ -261,7 +261,15 @@ export async function rehydrateFromCold(archiveId: string): Promise<string> {
 
   const chatId = String(data.conversationId || chatMeta.id || archiveId);
   const chatRef = doc(db, 'conversations', chatId);
-  if ((await resilientGetDoc(chatRef)).exists()) {
+  // Reading a missing conversation is denied by the rules (they check the owner of an
+  // existing document), so permission-denied here means "not in your chat list".
+  let alreadyThere = false;
+  try {
+    alreadyThere = (await resilientGetDoc(chatRef)).exists();
+  } catch (e) {
+    if ((e as { code?: string })?.code !== 'permission-denied') throw e;
+  }
+  if (alreadyThere) {
     throw new Error('A conversation with the same id is already in your chat list. Nothing was changed.');
   }
 
