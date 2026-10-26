@@ -1,8 +1,12 @@
-
 /**
- * Aitihya Chain (The Chain of Witness)
- * 
- * A blockchain-inspired architecture for immutable data linking and absolute focus.
+ * Aitihya chain: a tamper-evident hash chain (not a blockchain).
+ *
+ * Each block stores the SHA-256 hash of `${index}${timestamp}${JSON.stringify(data)}${previousHash}`
+ * and the hash of the block before it, starting from "ROOT_ETERNITY". Changing any
+ * block breaks every link after it, so edits are detectable. It is NOT immutable:
+ * whoever can write the store can rebuild the whole chain. Server ledger blocks
+ * (server/ledger.ts) use the same formula with `data` stored as a string, and are
+ * additionally HMAC-signed by the server; blocks made in the browser are unsigned.
  */
 
 export interface AitihyaBlock {
@@ -13,100 +17,68 @@ export interface AitihyaBlock {
   hash: string;
   agentId: string;
   role: string;
-  signature: string; // Cryptographic witness signature
+  /** HMAC from the server for server ledger blocks; "" for browser-made blocks. */
+  signature: string;
 }
 
-/**
- * Generates a SHA-256 hash for the block data and linkage.
- */
+export const ROOT_HASH = 'ROOT_ETERNITY';
+
+function getSubtle(): SubtleCrypto {
+  const subtle = typeof globalThis !== 'undefined' ? globalThis.crypto?.subtle : undefined;
+  if (!subtle) {
+    throw new Error('SHA-256 is unavailable: this browser does not provide crypto.subtle (a secure https context is required).');
+  }
+  return subtle;
+}
+
+/** SHA-256 (hex) of the block's index, timestamp, data and previous hash. Throws if hashing is unavailable. */
 export async function calculateHash(index: number, timestamp: string, data: any, previousHash: string): Promise<string> {
   const content = `${index}${timestamp}${JSON.stringify(data)}${previousHash}`;
-  
-  try {
-    const crypto = typeof window !== 'undefined' ? window.crypto : (await import('crypto')).webcrypto;
-    
-    if (crypto && crypto.subtle) {
-      const msgUint8 = new TextEncoder().encode(content);
-      const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-  } catch (e) {}
-
-  return `fallback-${Date.now().toString(16)}`;
+  const digest = await getSubtle().digest('SHA-256', new TextEncoder().encode(content));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 /**
- * Signs the hash using a secret key (HMAC-SHA256).
- * This ensures only the authorized "Oracle" (Server) can witness truth.
- */
-export async function signBlock(hash: string, secret: string): Promise<string> {
-  try {
-    const crypto = typeof window !== 'undefined' ? window.crypto : (await import('crypto')).webcrypto;
-    if (crypto && crypto.subtle) {
-      const enc = new TextEncoder();
-      const key = await crypto.subtle.importKey(
-        "raw",
-        enc.encode(secret),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"]
-      );
-      const sigBuffer = await crypto.subtle.sign("HMAC", key, enc.encode(hash));
-      const sigArray = Array.from(new Uint8Array(sigBuffer));
-      return sigArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-  } catch (e) {}
-  return "SERVER_AUTH_REQUIRED";
-}
-
-/**
- * Witnesses a new piece of data into the Aitihya Chain.
+ * Creates the next block after `previousBlock` (or the first block).
+ * Browser blocks are unsigned (signature ""). `_serverSecret` is ignored and kept
+ * only so existing callers stay compatible; signing happens on the server.
  */
 export async function witnessBlock(
-  data: any, 
-  agentId: string, 
-  role: string, 
-  previousBlock?: AitihyaBlock,
-  serverSecret?: string
+  data: any,
+  agentId: string,
+  role: string,
+  previousBlock?: Pick<AitihyaBlock, 'index' | 'hash'>,
+  _serverSecret?: string,
 ): Promise<AitihyaBlock> {
   const index = previousBlock ? previousBlock.index + 1 : 0;
   const timestamp = new Date().toISOString();
-  const previousHash = previousBlock ? previousBlock.hash : "ROOT_ETERNITY";
+  const previousHash = previousBlock ? previousBlock.hash : ROOT_HASH;
   const hash = await calculateHash(index, timestamp, data, previousHash);
-  
-  // Apply signature if secret is provided (Server-side)
-  const signature = serverSecret ? await signBlock(hash, serverSecret) : "";
-
-  return {
-    index,
-    timestamp,
-    data,
-    previousHash,
-    hash,
-    agentId,
-    role,
-    signature: signature // Added signature field to the block
-  };
+  return { index, timestamp, data, previousHash, hash, agentId, role, signature: '' };
 }
 
 /**
- * Verifies the integrity of the chain.
+ * Checks the hash chain: block 0 starts at ROOT_ETERNITY with index 0, indexes run
+ * without gaps, every previousHash matches the block before, and every hash is
+ * recomputed. Signatures are not checked here (the HMAC secret stays on the server).
+ * Pass the chain sorted by index.
  */
 export async function verifyIntegrity(chain: AitihyaBlock[]): Promise<boolean> {
-  for (let i = 1; i < chain.length; i++) {
-    const current = chain[i];
-    const previous = chain[i - 1];
+  if (chain.length === 0) return true;
+  const first = chain[0];
+  const startsAtRoot = first.index === 0;
+  if (startsAtRoot && first.previousHash !== ROOT_HASH) return false;
 
-    if (current.previousHash !== previous.hash) return false;
-    
-    const recalculated = await calculateHash(
-      current.index, 
-      current.timestamp, 
-      current.data, 
-      current.previousHash
-    );
-    
+  for (let i = 0; i < chain.length; i++) {
+    const current = chain[i];
+    if (i > 0) {
+      const previous = chain[i - 1];
+      if (current.index !== previous.index + 1) return false;
+      if (current.previousHash !== previous.hash) return false;
+    }
+    const recalculated = await calculateHash(current.index, current.timestamp, current.data, current.previousHash);
     if (recalculated !== current.hash) return false;
   }
   return true;

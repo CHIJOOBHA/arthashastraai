@@ -1,118 +1,195 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import type { User } from 'firebase/auth';
+import { motion } from 'motion/react';
+import { Globe, ChevronLeft, ChevronRight, Loader2, Database, ShieldAlert, Newspaper, Copy, Check, Send, MessageCircle, Landmark, ExternalLink, AlertCircle } from 'lucide-react';
+import { Chronicle, getChronicle, getRecentChronicles, requestTodayChronicle } from '../lib/chronicleStore';
+import { ApiError } from '../lib/api';
 
-import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { Landmark, Globe, Calendar, ChevronLeft, ChevronRight, Hash, Search, Loader2, Database, ShieldAlert, Newspaper, Share2, Copy, Check, Send, MessageCircle } from 'lucide-react';
-import { Chronicle, getChronicle, generateDailyChronicle, getRecentChronicles } from '../lib/chronicleStore';
-import { auth } from '../lib/firebase';
+interface GazetteProps {
+  initialDate?: string;
+  user?: User | null;
+  language?: string;
+  isAdmin?: boolean;
+}
 
-export function ArthashastraGazette({ initialDate }: { initialDate?: string }) {
-  const [selectedDate, setSelectedDate] = useState(initialDate || new Date().toISOString().split('T')[0]);
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+const pad = (n: number) => String(n).padStart(2, '0');
+const toYmd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+/** Local calendar date from "YYYY-MM-DD" (never parsed as UTC). */
+const fromYmd = (s: string) => {
+  const [y, m, d] = s.split('-').map(Number);
+  return new Date(y, m - 1, d);
+};
+const shiftYmd = (s: string, days: number) => {
+  const d = fromYmd(s);
+  d.setDate(d.getDate() + days);
+  return toYmd(d);
+};
+const localToday = () => toYmd(new Date());
+/** The server dates editions in UTC; it can be a day ahead of the reader's local date. */
+const utcToday = () => new Date().toISOString().slice(0, 10);
+const latestAllowed = () => (utcToday() > localToday() ? utcToday() : localToday());
+const isValidYmd = (s?: string) => !!s && YMD_RE.test(s) && !isNaN(fromYmd(s).getTime());
+
+const POLL_EVERY_MS = 10_000;
+const POLL_MAX_MS = 180_000;
+
+export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
+  const [selectedDate, setSelectedDate] = useState(() => (isValidYmd(initialDate) ? initialDate! : localToday()));
   const [chronicle, setChronicle] = useState<Chronicle | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
   const [history, setHistory] = useState<Chronicle[]>([]);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [copiedData, setCopiedData] = useState<string | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Increments on every date change / unmount so stale responses and polls are ignored.
+  const requestRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    pollTimerRef.current = null;
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    setHistory(await getRecentChronicles());
+  }, []);
 
   useEffect(() => {
-    // Check admin status derived from the email list in our rules (approximate client check)
-    const adminEmails = ["jhansidharmana222@gmail.com", "chitti.bhargav3@gmail.com"];
-    setIsAdmin(auth.currentUser ? adminEmails.includes(auth.currentUser.email || "") : false);
-  }, [auth.currentUser]);
-
-  useEffect(() => {
-    loadChronicle(selectedDate);
     loadHistory();
-  }, [selectedDate]);
+  }, [loadHistory]);
 
-  const loadChronicle = async (date: string) => {
+  useEffect(() => {
+    const req = ++requestRef.current;
+    stopPolling();
+    setGenerating(false);
+    setGenError(null);
+    setLoadError(null);
     setLoading(true);
-    const data = await getChronicle(date);
-    setChronicle(data);
-    setLoading(false);
-  };
+    getChronicle(selectedDate)
+      .then((data) => {
+        if (requestRef.current !== req) return;
+        setChronicle(data && data.status === 'ready' ? data : null);
+      })
+      .catch((e) => {
+        if (requestRef.current !== req) return;
+        console.error('[Gazette] load failed:', e);
+        setChronicle(null);
+        setLoadError('Could not load this edition. Check your connection and try again.');
+      })
+      .finally(() => {
+        if (requestRef.current === req) setLoading(false);
+      });
+  }, [selectedDate, stopPolling]);
 
-  const loadHistory = async () => {
-    const data = await getRecentChronicles(30);
-    setHistory(data);
-  };
+  // Cancel any polling when the page closes.
+  useEffect(
+    () => () => {
+      requestRef.current++;
+      stopPolling();
+    },
+    [stopPolling],
+  );
 
   const handleGenerate = async () => {
-    if (!isAdmin) return;
+    if (!user || generating) return;
+    const req = requestRef.current;
+    const startedAt = Date.now();
     setGenerating(true);
-    try {
-      const data = await generateDailyChronicle(selectedDate);
-      setChronicle(data);
-      loadHistory();
-    } catch (e: any) {
-      console.error("Chronicle Generation Failed:", e);
-      alert(`Neural Generation Failed. ${e.message || "Quota issues likely."}`);
-    } finally {
-      setGenerating(false);
-    }
+    setGenError(null);
+
+    const attempt = async () => {
+      try {
+        const result = await requestTodayChronicle();
+        if (requestRef.current !== req) return;
+        if (result.status === 'ready') {
+          setGenerating(false);
+          loadHistory();
+          if (result.date && result.date !== selectedDate) {
+            setSelectedDate(result.date); // the date effect reloads it
+          } else {
+            setChronicle(result);
+          }
+          return;
+        }
+        if (result.status === 'failed') {
+          setGenerating(false);
+          setGenError('Today\'s edition could not be written right now. Please try again later.');
+          return;
+        }
+        if (Date.now() - startedAt >= POLL_MAX_MS) {
+          setGenerating(false);
+          setGenError('This is taking longer than usual. Please check back in a few minutes.');
+          return;
+        }
+        pollTimerRef.current = setTimeout(attempt, POLL_EVERY_MS);
+      } catch (e) {
+        if (requestRef.current !== req) return;
+        setGenerating(false);
+        setGenError(e instanceof ApiError ? e.message : 'Could not reach the server. Please try again.');
+      }
+    };
+    attempt();
   };
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-US', { 
-      day: 'numeric', 
-      month: 'long', 
-      year: 'numeric' 
-    }).toUpperCase();
-  };
+  const formatDate = (dateStr: string) =>
+    fromYmd(dateStr).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }).toUpperCase();
+
+  const shareUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/gazette/${selectedDate}`;
+  const canGoForward = selectedDate < latestAllowed();
+  const isTodayish = selectedDate === localToday() || selectedDate === utcToday();
 
   return (
-    <div className="min-h-screen bg-void flex flex-col font-sans text-parchment animate-in fade-in duration-555">
+    <div className="min-h-screen bg-void flex flex-col font-sans text-parchment">
       {/* Header Section */}
-      <header className="border-b border-neon-cyan/21 bg-void/55 backdrop-blur-md sticky top-0 z-50 px-21 py-13 flex items-center justify-between">
+      <header className="border-b border-neon-cyan/21 bg-void/55 backdrop-blur-md sticky top-0 z-50 px-21 py-13 flex items-center justify-between gap-13 flex-wrap">
         <a href="/" className="flex items-center gap-13 hover:opacity-80 transition-opacity">
           <Newspaper className="w-21 h-21 text-neon-cyan drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]" />
-          <h1 className="text-13 caps-modern text-neon-cyan tracking-[0.34em] font-bold">ARTHASHASTRA CHRONICLE</h1>
+          <h1 className="text-13 caps-modern text-neon-cyan tracking-[0.34em] font-bold">ARTHASHASTRA GAZETTE</h1>
         </a>
-        
+
         <div className="flex items-center gap-13">
           <div className="flex items-center gap-21 bg-neon-cyan/5 border border-neon-cyan/13 rounded-full px-13 py-5">
             <div className="flex items-center gap-8 border-r border-neon-cyan/13 pr-13">
-              <span className="text-[9px] font-mono text-neon-cyan/55 uppercase tracking-widest">Temporal Node</span>
+              <span className="text-[9px] font-mono text-neon-cyan/55 uppercase tracking-widest">Edition</span>
               <span className="text-13 font-mono text-neon-cyan font-bold">{selectedDate}</span>
             </div>
             <div className="flex gap-8">
-              <button 
-                onClick={() => {
-                  const d = new Date(selectedDate);
-                  d.setDate(d.getDate() - 1);
-                  setSelectedDate(d.toISOString().split('T')[0]);
-                }}
+              <button
+                onClick={() => setSelectedDate((d) => shiftYmd(d, -1))}
                 className="p-3 text-neon-cyan/55 hover:text-neon-cyan transition-colors"
+                aria-label="Previous day"
               >
                 <ChevronLeft className="w-13 h-13" />
               </button>
-              <button 
-                onClick={() => {
-                  const d = new Date(selectedDate);
-                  d.setDate(d.getDate() + 1);
-                  setSelectedDate(d.toISOString().split('T')[0]);
-                }}
-                className="p-3 text-neon-cyan/55 hover:text-neon-cyan transition-colors"
-                disabled={selectedDate === new Date().toISOString().split('T')[0]}
+              <button
+                onClick={() => setSelectedDate((d) => (d < latestAllowed() ? shiftYmd(d, 1) : d))}
+                className="p-3 text-neon-cyan/55 hover:text-neon-cyan transition-colors disabled:opacity-21 disabled:cursor-not-allowed"
+                disabled={!canGoForward}
+                aria-label="Next day"
               >
                 <ChevronRight className="w-13 h-13" />
               </button>
             </div>
           </div>
-          
+
           <button
             onClick={async () => {
               try {
-                await navigator.clipboard.writeText(`${window.location.origin}/gazette/${selectedDate}`);
-                // Could add a temporary state for checkmark, but let's just copy
-                alert(`URL copied: ${window.location.origin}/gazette/${selectedDate}`);
-              } catch (e) {}
+                await navigator.clipboard.writeText(shareUrl);
+                setLinkCopied(true);
+                setTimeout(() => setLinkCopied(false), 2000);
+              } catch {
+                /* clipboard blocked */
+              }
             }}
             className="flex items-center gap-5 px-8 py-5 border border-neon-cyan text-neon-cyan hover:bg-neon-cyan hover:text-void transition-colors rounded text-[10px] caps-modern font-bold shadow-[0_0_8px_rgba(0,230,118,0.3)]"
-            title="Copy Signal Link"
+            title="Copy link to this edition"
           >
-            <Copy className="w-13 h-13" />
-            <span className="hidden sm:inline">COPY SIGNAL</span>
+            {linkCopied ? <Check className="w-13 h-13" /> : <Copy className="w-13 h-13" />}
+            <span className="hidden sm:inline">{linkCopied ? 'LINK COPIED' : 'COPY LINK'}</span>
           </button>
         </div>
       </header>
@@ -122,35 +199,33 @@ export function ArthashastraGazette({ initialDate }: { initialDate?: string }) {
         <aside className="w-full lg:w-[280px] border-r border-neon-cyan/13 lg:min-h-[calc(100vh-60px)] p-21 bg-void/34">
           <div className="mb-21">
             <h3 className="text-[10px] caps-modern text-neon-cyan/55 mb-13 tracking-widest flex items-center gap-8">
-              <Database className="w-10 h-10" />
-              HISTORICAL REPOSITORY
+              <Database className="w-[10px] h-[10px]" />
+              PAST EDITIONS
             </h3>
             <div className="space-y-5 max-h-[300px] overflow-y-auto silk-scroll pr-8">
-              {history.map(item => (
+              {history.map((item) => (
                 <button
                   key={item.id}
-                  onClick={() => setSelectedDate(item.id)}
+                  onClick={() => setSelectedDate(item.date || item.id)}
                   className={`w-full text-left p-8 rounded border transition-all flex items-center justify-between group ${
-                    selectedDate === item.id 
-                      ? 'bg-neon-cyan/13 border-neon-cyan text-neon-cyan shadow-[0_0_8px_rgba(0,240,255,0.2)]' 
+                    selectedDate === (item.date || item.id)
+                      ? 'bg-neon-cyan/13 border-neon-cyan text-neon-cyan shadow-[0_0_8px_rgba(0,240,255,0.2)]'
                       : 'border-transparent hover:border-neon-cyan/21 text-parchment/34 hover:text-parchment'
                   }`}
                 >
-                  <span className="text-13 font-mono">{item.id}</span>
-                  <ChevronRight className={`w-10 h-10 transition-opacity ${selectedDate === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
+                  <span className="text-13 font-mono">{item.date || item.id}</span>
+                  <ChevronRight className={`w-[10px] h-[10px] transition-opacity ${selectedDate === (item.date || item.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
                 </button>
               ))}
             </div>
-            {history.length === 0 && !loading && (
-              <p className="text-[10px] text-parchment/21 italic py-13">No previous records found.</p>
+            {history.length === 0 && (
+              <p className="text-[10px] text-parchment/34 italic py-13">No past editions yet.</p>
             )}
           </div>
 
-          <div className="mt-auto pt-21 border-t border-neon-cyan/8 opacity-34">
-            <p className="text-[9px] font-mono text-neon-cyan/55 leading-relaxed">
-              CHRONICLE STATUS: AUTOMATED<br />
-              UPDATE_CYCLE: 24H<br />
-              SOURCE_VETTING: DARK_WEB_SIMULATED
+          <div className="mt-auto pt-21 border-t border-neon-cyan/8">
+            <p className="text-[10px] font-sans text-parchment/55 leading-relaxed">
+              One edition per day, written by AI from news reports published in the previous 48 hours. Each edition links its sources: read them before you rely on a story.
             </p>
           </div>
         </aside>
@@ -160,321 +235,154 @@ export function ArthashastraGazette({ initialDate }: { initialDate?: string }) {
           {loading ? (
             <div className="flex flex-col items-center justify-center py-144 space-y-21">
               <Loader2 className="w-55 h-55 text-neon-cyan animate-spin opacity-55" />
-              <p className="text-13 caps-modern tracking-[0.34em] text-neon-cyan animate-pulse">Consulting Neural Archive...</p>
+              <p className="text-13 caps-modern tracking-[0.34em] text-neon-cyan animate-pulse">Loading edition...</p>
             </div>
           ) : chronicle ? (
-            <div className="space-y-55 animate-in slide-in-from-bottom-5 duration-777">
+            <div className="space-y-55">
               {/* Newspaper Masthead */}
               <div className="text-center py-55 border-b-4 border-double border-neon-cyan/34 mb-55 bg-neon-cyan/[0.02] relative overflow-hidden px-21">
-                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/pinstriped-suit.png')] opacity-10 pointer-events-none" />
+                <div
+                  className="absolute inset-0 opacity-10 pointer-events-none"
+                  style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(248,250,240,0.35) 0 1px, transparent 1px 6px)' }}
+                />
                 <div className="relative z-10 flex flex-col items-center">
-                  <div className="flex items-center gap-13 opacity-55 caps-modern text-[10px] tracking-[0.55em] text-neon-cyan mb-13">
-                    <span>VOL. MMXXVI</span>
-                    <div className="w-5 h-5 rounded-full bg-neon-cyan/34" />
-                    <span>EDITION: ALPHA-NODE</span>
-                  </div>
                   <h1 className="text-55 md:text-89 font-display font-black tracking-tighter leading-none text-parchment drop-shadow-[0_0_15px_rgba(230,241,255,0.3)] uppercase">
                     THE ARTHASHASTRA <span className="text-neon-cyan [text-shadow:0_0_21px_rgba(0,230,118,0.5)]">GAZETTE</span>
                   </h1>
                   <div className="w-full max-w-[610px] h-1 bg-gradient-to-r from-transparent via-neon-cyan/55 to-transparent mt-13" />
                   <div className="flex items-center justify-center gap-34 mt-21 w-full">
                     <div className="hidden md:block flex-1 h-[1px] bg-neon-cyan/21" />
-                    <div className="flex items-center gap-21 whitespace-nowrap">
-                      <span className="text-11 caps-modern text-neon-cyan/89 tracking-[0.21em] italic">Absolute Witness Neural Feed</span>
-                      <span className="text-11 caps-modern text-parchment/34">|</span>
-                      <span className="text-11 caps-modern text-neon-cyan/89 tracking-[0.21em]">{formatDate(selectedDate)}</span>
+                    <div className="flex flex-wrap items-center justify-center gap-13 md:gap-21">
+                      <span className="text-11 caps-modern text-neon-cyan/89 tracking-[0.21em] italic">AI-generated summary of linked news reports</span>
+                      <span className="text-11 caps-modern text-parchment/34 hidden md:inline">|</span>
+                      <span className="text-11 caps-modern text-neon-cyan/89 tracking-[0.21em]">{formatDate(chronicle.date || selectedDate)}</span>
                     </div>
                     <div className="hidden md:block flex-1 h-[1px] bg-neon-cyan/21" />
                   </div>
                 </div>
               </div>
 
-              {/* Layout: Main Articles */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-55">
-                {/* World Article */}
-                <article className="space-y-13">
-                  <div className="flex items-center justify-between mb-8">
-                    <div className="flex items-center gap-8">
-                      <Globe className="w-13 h-13 text-neon-magenta" />
-                      <span className="text-[10px] caps-modern text-neon-magenta tracking-widest">SYSTEMIC GLOBAL ANALYSIS</span>
-                    </div>
-                    {chronicle.articleWorld.editorialLabel && (
-                      <span className="text-[9px] px-8 py-2 bg-neon-magenta/13 text-neon-magenta border border-neon-magenta/34 rounded-full caps-modern tracking-wider">
-                        {chronicle.articleWorld.editorialLabel}
-                      </span>
-                    )}
-                  </div>
-                  <h2 className="text-34 lg:text-44 font-serif italic text-parchment leading-[0.9] tracking-tight">
-                    {chronicle.articleWorld.title}
-                  </h2>
-                  <DistributionHub 
-                    title={chronicle.articleWorld.title}
-                    summary={chronicle.articleWorld.summary}
-                    region="World"
-                    colorTheme="magenta"
-                    date={selectedDate}
-                  />
-                  <div className="bg-neon-magenta/5 border-l-2 border-neon-magenta p-13">
-                    <p className="text-13 font-medium text-neon-magenta italic">{chronicle.articleWorld.summary}</p>
-                  </div>
-                  
-                  {chronicle.articleWorld.lead && (
-                    <div className="text-15 font-sans font-semibold leading-relaxed text-parchment/89 border-b border-neon-magenta/13 pb-13">
-                      {chronicle.articleWorld.lead}
+              {/* Lead */}
+              {(chronicle.headline || chronicle.summary) && (
+                <div className="space-y-13">
+                  {chronicle.headline && (
+                    <h2 className="text-34 font-serif italic text-parchment leading-tight tracking-tight">{chronicle.headline}</h2>
+                  )}
+                  {chronicle.summary && (
+                    <div className="bg-neon-cyan/5 border-l-2 border-neon-cyan p-13">
+                      <p className="text-13 font-medium text-neon-cyan italic leading-relaxed">{chronicle.summary}</p>
                     </div>
                   )}
-
-                  <div className="prose prose-invert prose-neon text-13 opacity-89 leading-relaxed max-w-none">
-                    {chronicle.articleWorld.content.split('\n\n').map((p, i) => <p key={i}>{p}</p>)}
-                  </div>
-
-                  {chronicle.articleWorld.counterArgument && (
-                    <div className="mt-21 p-13 border border-dashed border-neon-magenta/21 bg-void/55 rounded-8">
-                      <span className="text-[9px] caps-modern text-neon-magenta/55 mb-8 block font-bold">OPPOSING VIEW & REBUTTAL</span>
-                      <p className="text-11 italic text-parchment/55 leading-relaxed">
-                        {chronicle.articleWorld.counterArgument}
-                      </p>
-                    </div>
-                  )}
-
-                  {chronicle.articleWorld.callToAction && (
-                    <div className="mt-21 p-13 bg-neon-magenta/13 border-l-4 border-neon-magenta rounded-r-8">
-                       <span className="text-[9px] caps-modern text-neon-magenta mb-5 block font-bold">CALL TO ACTION</span>
-                       <p className="text-13 font-bold text-parchment leading-tight tracking-tight uppercase">
-                         {chronicle.articleWorld.callToAction}
-                       </p>
-                    </div>
-                  )}
-
-                  {chronicle.articleWorld.perspective && (
-                    <div className="mt-21 p-21 glass-panel border border-neon-magenta/34 bg-neon-magenta/5 relative">
-                      <div className="absolute top-0 left-0 w-full h-1 bg-neon-magenta/34" />
-                      <h4 className="text-[10px] caps-modern text-neon-magenta mb-8 tracking-widest font-bold">NEURAL PERSPECTIVE: RESOLUTION STRATEGY</h4>
-                      <p className="text-13 text-parchment leading-relaxed italic">
-                        "{chronicle.articleWorld.perspective}"
-                      </p>
-                    </div>
-                  )}
-
-                  {chronicle.articleWorld.sources && chronicle.articleWorld.sources.length > 0 && (
-                    <div className="mt-13 pt-13 border-t border-neon-magenta/13">
-                      <span className="text-[9px] caps-modern text-neon-magenta/55 tracking-widest block mb-5">VERIFIED SOURCES & POLICY REFERENCES:</span>
-                      <ul className="list-none space-y-3">
-                        {chronicle.articleWorld.sources.map((src, i) => (
-                          <li key={i} className="text-11 text-parchment/55 leading-tight flex items-start gap-5">
-                            <div className="w-3 h-[1px] bg-neon-magenta/34 mt-5" />
-                            {src}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {chronicle.articleWorld.auditTrail && (
-                    <div className="mt-13 opacity-34 hover:opacity-100 transition-opacity">
-                      <details className="cursor-pointer">
-                        <summary className="text-[9px] caps-modern text-parchment tracking-widest list-none flex items-center gap-5">
-                          <Database className="w-8 h-8" /> AUDIT TRAIL: NEURAL DECISION LOG
-                        </summary>
-                        <p className="text-[10px] italic mt-5 leading-relaxed bg-void/55 p-8 rounded border border-parchment/8">
-                          {chronicle.articleWorld.auditTrail}
-                        </p>
-                      </details>
-                    </div>
-                  )}
-                </article>
-
-                {/* India Article */}
-                <article className="space-y-13">
-                  <div className="flex items-center justify-between mb-8">
-                    <div className="flex items-center gap-8">
-                      <Landmark className="w-13 h-13 text-neon-cyan" />
-                      <span className="text-[10px] caps-modern text-neon-cyan tracking-widest">REGIONAL CORE INTELLIGENCE: INDIA</span>
-                    </div>
-                    {chronicle.articleIndia.editorialLabel && (
-                      <span className="text-[9px] px-8 py-2 bg-neon-cyan/13 text-neon-cyan border border-neon-cyan/34 rounded-full caps-modern tracking-wider">
-                        {chronicle.articleIndia.editorialLabel}
-                      </span>
-                    )}
-                  </div>
-                  <h2 className="text-34 lg:text-44 font-serif italic text-parchment leading-[0.9] tracking-tight">
-                    {chronicle.articleIndia.title}
-                  </h2>
-                  <DistributionHub 
-                    title={chronicle.articleIndia.title}
-                    summary={chronicle.articleIndia.summary}
-                    region="India"
-                    colorTheme="cyan"
-                    date={selectedDate}
-                  />
-                  <div className="bg-neon-cyan/5 border-l-2 border-neon-cyan p-13">
-                    <p className="text-13 font-medium text-neon-cyan italic">{chronicle.articleIndia.summary}</p>
-                  </div>
-
-                  {chronicle.articleIndia.lead && (
-                    <div className="text-15 font-sans font-semibold leading-relaxed text-parchment/89 border-b border-neon-cyan/13 pb-13">
-                      {chronicle.articleIndia.lead}
-                    </div>
-                  )}
-
-                  <div className="prose prose-invert prose-neon text-13 opacity-89 leading-relaxed max-w-none">
-                    {chronicle.articleIndia.content.split('\n\n').map((p, i) => <p key={i}>{p}</p>)}
-                  </div>
-
-                  {chronicle.articleIndia.counterArgument && (
-                    <div className="mt-21 p-13 border border-dashed border-neon-cyan/21 bg-void/55 rounded-8">
-                      <span className="text-[9px] caps-modern text-neon-cyan/55 mb-8 block font-bold">OPPOSING VIEW & REBUTTAL</span>
-                      <p className="text-11 italic text-parchment/55 leading-relaxed">
-                        {chronicle.articleIndia.counterArgument}
-                      </p>
-                    </div>
-                  )}
-
-                  {chronicle.articleIndia.callToAction && (
-                    <div className="mt-21 p-13 bg-neon-cyan/13 border-l-4 border-neon-cyan rounded-r-8">
-                       <span className="text-[9px] caps-modern text-neon-cyan mb-5 block font-bold">CALL TO ACTION</span>
-                       <p className="text-13 font-bold text-parchment leading-tight tracking-tight uppercase">
-                         {chronicle.articleIndia.callToAction}
-                       </p>
-                    </div>
-                  )}
-
-                  {chronicle.articleIndia.perspective && (
-                    <div className="mt-21 p-21 glass-panel border border-neon-cyan/34 bg-neon-cyan/5 relative">
-                      <div className="absolute top-0 left-0 w-full h-1 bg-neon-cyan/34" />
-                      <h4 className="text-[10px] caps-modern text-neon-cyan mb-8 tracking-widest font-bold">NEURAL PERSPECTIVE: RESOLUTION STRATEGY</h4>
-                      <p className="text-13 text-parchment leading-relaxed italic">
-                        "{chronicle.articleIndia.perspective}"
-                      </p>
-                    </div>
-                  )}
-
-                  {chronicle.articleIndia.sources && chronicle.articleIndia.sources.length > 0 && (
-                    <div className="mt-13 pt-13 border-t border-neon-cyan/13">
-                      <span className="text-[9px] caps-modern text-neon-cyan/55 tracking-widest block mb-5">VERIFIED SOURCES & POLICY REFERENCES:</span>
-                      <ul className="list-none space-y-3">
-                        {chronicle.articleIndia.sources.map((src, i) => (
-                          <li key={i} className="text-11 text-parchment/55 leading-tight flex items-start gap-5">
-                            <div className="w-3 h-[1px] bg-neon-cyan/34 mt-5" />
-                            {src}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {chronicle.articleIndia.auditTrail && (
-                    <div className="mt-13 opacity-34 hover:opacity-100 transition-opacity">
-                      <details className="cursor-pointer">
-                        <summary className="text-[9px] caps-modern text-parchment tracking-widest list-none flex items-center gap-5">
-                          <Database className="w-8 h-8" /> AUDIT TRAIL: NEURAL DECISION LOG
-                        </summary>
-                        <p className="text-[10px] italic mt-5 leading-relaxed bg-void/55 p-8 rounded border border-parchment/8">
-                          {chronicle.articleIndia.auditTrail}
-                        </p>
-                      </details>
-                    </div>
-                  )}
-                </article>
-              </div>
-
-              {/* Layout: Daily Tweets Counter-Stream */}
-              <div className="mt-55 border-t border-neon-cyan/21 pt-34">
-                <div className="flex items-center gap-13 mb-34">
-                  <Globe className="w-21 h-21 text-neon-cyan" />
-                  <h3 className="text-21 caps-modern text-neon-cyan tracking-widest">DAILY NEURAL REBUTTALS</h3>
+                  <DistributionHub title={chronicle.headline || 'The Arthashastra Gazette'} summary={chronicle.summary} shareUrl={shareUrl} />
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-21">
-                  {(chronicle.tweets || []).map((tweet, i) => (
-                    <motion.div 
+              )}
+
+              {/* Stories */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-34">
+                {chronicle.stories.map((story, i) => {
+                  const magenta = i % 2 === 1;
+                  return (
+                    <motion.article
                       key={i}
-                      whileHover={{ scale: 1.02 }}
-                      className={`p-13 border rounded-8 relative overflow-hidden group ${
-                        tweet.region === 'India' ? 'bg-neon-cyan/5 border-neon-cyan/21' : 'bg-neon-magenta/5 border-neon-magenta/21'
-                      }`}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`space-y-13 p-21 border rounded-8 ${magenta ? 'border-neon-magenta/21 bg-neon-magenta/[0.03]' : 'border-neon-cyan/21 bg-neon-cyan/[0.03]'}`}
                     >
-                      <div className="flex items-center justify-between mb-13 border-b border-inherit pb-8">
-                        <span className="text-[9px] font-mono opacity-55">LOG NODE_{i+1}</span>
-                        <div className="flex items-center gap-8">
-                          <button 
-                            onClick={async () => {
-                              try {
-                                await navigator.clipboard.writeText(`Arthashastra Neural Rebuttal:\n\n${tweet.text}\n\nRead more at: ${window.location.origin}/gazette/${selectedDate}`);
-                                setCopiedData(`tweet-${i}`);
-                                setTimeout(() => setCopiedData(null), 2000);
-                              } catch (e) {}
-                            }}
-                            className={`opacity-34 hover:opacity-100 transition-opacity ${tweet.region === 'India' ? 'text-neon-cyan' : 'text-neon-magenta'}`}
-                          >
-                            {copiedData === `tweet-${i}` ? <Check className="w-10 h-10" /> : <Copy className="w-10 h-10" />}
-                          </button>
-                          <div className={`w-1.5 h-1.5 rounded-full ${tweet.region === 'India' ? 'bg-neon-cyan' : 'bg-neon-magenta'} animate-pulse`} />
-                        </div>
+                      <div className="flex items-center gap-8">
+                        <Globe className={`w-13 h-13 ${magenta ? 'text-neon-magenta' : 'text-neon-cyan'}`} />
+                        <span className={`text-[10px] caps-modern tracking-widest ${magenta ? 'text-neon-magenta' : 'text-neon-cyan'}`}>
+                          {(story.region || 'Global').toUpperCase()}
+                        </span>
                       </div>
-                      <p className="text-13 leading-relaxed mb-5">{tweet.text}</p>
-                      {tweet.source && (
-                        <div className="text-[8px] italic opacity-55 mt-5 leading-none border-t border-inherit pt-5">
-                          REF: {tweet.source}
+                      {story.title && <h3 className="text-21 font-serif italic text-parchment leading-tight">{story.title}</h3>}
+                      {story.whatHappened && (
+                        <div>
+                          <span className="text-[9px] caps-modern text-parchment/55 block mb-5 font-bold">WHAT HAPPENED</span>
+                          <p className="text-13 text-parchment/89 leading-relaxed">{story.whatHappened}</p>
                         </div>
                       )}
-                      <div className="text-[9px] font-bold caps-modern mt-8 opacity-34 group-hover:opacity-100 transition-opacity flex items-center justify-between">
-                        <span>{tweet.region.toUpperCase()}</span>
-                        <Hash className="w-8 h-8" />
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
+                      {story.whoPays && (
+                        <div className={`p-13 border-l-4 rounded-r-8 ${magenta ? 'bg-neon-magenta/13 border-neon-magenta' : 'bg-neon-cyan/13 border-neon-cyan'}`}>
+                          <span className={`text-[9px] caps-modern block mb-5 font-bold ${magenta ? 'text-neon-magenta' : 'text-neon-cyan'}`}>WHO PAYS</span>
+                          <p className="text-13 text-parchment leading-relaxed">{story.whoPays}</p>
+                        </div>
+                      )}
+                    </motion.article>
+                  );
+                })}
               </div>
 
-              <div className="text-center pt-89 border-t border-neon-cyan/8 space-y-13 pb-55">
-                <div className="text-[10px] caps-modern tracking-[0.5em] text-parchment opacity-21">
-                  NO TRUTH CAN BE IGNORED. HISTORY IS THE WITNESS.
-                </div>
-                {chronicle.editorialStandards && (
-                  <div className="flex flex-col items-center gap-5">
-                    <span className="text-[9px] caps-modern text-neon-cyan/55 tracking-widest">{chronicle.editorialStandards.toUpperCase()}</span>
-                    <p className="text-[8px] text-parchment/34 max-w-2xl mx-auto italic leading-relaxed">
-                      Adherence to Accuracy, Fairness, and Accountability protocols (aligned with Press Council of India Norms & IFJ Global Charter). 
-                      All archived records are subject to neural audit and correction.
-                    </p>
-                  </div>
+              {/* Sources */}
+              <div className="border-t border-neon-cyan/21 pt-34">
+                <h3 className="text-13 caps-modern text-neon-cyan tracking-widest mb-13">SOURCES</h3>
+                {chronicle.sources.length > 0 ? (
+                  <ul className="space-y-8">
+                    {chronicle.sources.map((src, i) => (
+                      <li key={i} className="text-13 text-parchment/55 leading-tight flex items-start gap-8">
+                        <ExternalLink className="w-[11px] h-[11px] mt-[3px] text-neon-cyan/55 shrink-0" />
+                        <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" className="hover:text-neon-cyan underline decoration-neon-cyan/21 break-words">
+                          {src.title || src.url}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-13 text-parchment/55 italic">No source links were saved with this edition. Treat it with extra caution.</p>
                 )}
+              </div>
+
+              <div className="text-center pt-55 border-t border-neon-cyan/8 pb-55">
+                <p className="text-[11px] text-parchment/55 max-w-2xl mx-auto leading-relaxed">
+                  This edition is an AI-generated summary of the news reports linked above. AI can misread or misstate facts: check the sources before you rely on or share a story. Not financial, legal or investment advice.
+                </p>
               </div>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-89 space-y-34">
               <div className="relative">
-                <ShieldAlert className="w-55 h-55 text-neon-magenta animate-pulse" />
+                <ShieldAlert className="w-55 h-55 text-neon-magenta" />
                 <div className="absolute inset-0 bg-neon-magenta/21 blur-[21px] rounded-full" />
               </div>
               <div className="text-center space-y-13 max-w-md mx-auto">
-                <h3 className="text-21 text-neon-magenta caps-modern font-bold tracking-widest">VOID DETECTED</h3>
-                <p className="text-13 opacity-55 leading-relaxed">
-                  The chronicle for this temporal node has not been witnessed. 
-                  {isAdmin ? " As an authorized agent, you may trigger the neural assembly to finalize this record." : " Please consult valid archives or return later."}
+                <h3 className="text-21 text-neon-magenta caps-modern font-bold tracking-widest">NO EDITION FOR THIS DATE</h3>
+                <p className="text-13 text-parchment/55 leading-relaxed">
+                  {loadError
+                    ? loadError
+                    : isTodayish
+                      ? user
+                        ? "Today's edition hasn't been written yet. You can ask for it now; it takes about a minute and is shared with every reader."
+                        : "Today's edition hasn't been written yet. Sign in to request it, or check back later."
+                      : 'There is no edition for this date. Pick another date from the list.'}
                 </p>
               </div>
 
-              {isAdmin && (
+              {genError && (
+                <div className="flex items-center gap-8 p-13 border border-rose-950 bg-rose-950/21 rounded-8 text-rose-400 text-13 max-w-md">
+                  <AlertCircle className="w-13 h-13 shrink-0" />
+                  <span>{genError}</span>
+                </div>
+              )}
+
+              {user && isTodayish && (
                 <button
                   onClick={handleGenerate}
                   disabled={generating}
-                  className="px-34 py-13 bg-neon-magenta/13 border border-neon-magenta text-neon-magenta hover:bg-neon-magenta hover:text-void transition-all rounded-8 caps-modern tracking-[0.21em] flex items-center gap-13 group"
+                  className="px-34 py-13 bg-neon-magenta/13 border border-neon-magenta text-neon-magenta hover:bg-neon-magenta hover:text-void transition-all rounded-8 caps-modern tracking-[0.21em] flex items-center gap-13 group disabled:cursor-wait"
                 >
                   {generating ? (
                     <div className="flex flex-col items-center gap-8">
                       <div className="flex items-center gap-13">
                         <Loader2 className="w-13 h-13 animate-spin" />
-                        Neural Assembly Active...
+                        Writing today's edition...
                       </div>
-                      <div className="text-[9px] caps-modern text-neon-magenta/55 animate-pulse">
-                        Synchronizing global telemetry & verifying historical proof. This may take 60-90 seconds.
+                      <div className="text-[9px] caps-modern text-neon-magenta/55">
+                        Searching recent news reports. This can take 1–3 minutes.
                       </div>
                     </div>
                   ) : (
                     <>
                       <Landmark className="w-13 h-13 group-hover:rotate-12 transition-transform" />
-                      GENERATE CHRONICLE
+                      GENERATE TODAY'S EDITION
                     </>
                   )}
                 </button>
@@ -487,63 +395,50 @@ export function ArthashastraGazette({ initialDate }: { initialDate?: string }) {
   );
 }
 
-function DistributionHub({ title, summary, region, colorTheme, date }: { title: string, summary: string, region: 'India' | 'World', colorTheme: 'magenta' | 'cyan', date: string }) {
+function DistributionHub({ title, summary, shareUrl }: { title: string; summary: string; shareUrl: string }) {
   const [copied, setCopied] = useState(false);
-  
+  const shareText = `Arthashastra Gazette (AI-generated news summary): ${title}${summary ? `\n\n${summary}` : ''}`;
+
   const handleCopy = async () => {
     try {
-      const shareUrl = `${window.location.origin}/gazette/${date}`;
-      const shareText = `Arthashastra Gazette (${region}): ${title}\n\n${summary}`;
-      await navigator.clipboard.writeText(`${shareText}\n\nRead truth on: ${shareUrl}`);
+      await navigator.clipboard.writeText(`${shareText}\n\nSources and full edition: ${shareUrl}`);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error(e);
+    } catch {
+      /* clipboard blocked */
     }
   };
 
-  const getUrl = () => encodeURIComponent(`${window.location.origin}/gazette/${date}`);
-  const getText = () => encodeURIComponent(`Arthashastra Gazette (${region}): ${title}\n\n${summary}`);
-
-  const themeClasses = colorTheme === 'magenta' 
-    ? 'bg-neon-magenta/10 border-neon-magenta/34 hover:bg-neon-magenta/21 text-neon-magenta shadow-[0_0_8px_rgba(255,0,255,0.1)] hover:shadow-[0_0_13px_rgba(255,0,255,0.3)]' 
-    : 'bg-neon-cyan/10 border-neon-cyan/34 hover:bg-neon-cyan/21 text-neon-cyan shadow-[0_0_8px_rgba(0,240,255,0.1)] hover:shadow-[0_0_13px_rgba(0,240,255,0.3)]';
+  const url = encodeURIComponent(shareUrl);
+  const text = encodeURIComponent(shareText);
+  const themeClasses =
+    'bg-neon-cyan/10 border-neon-cyan/34 hover:bg-neon-cyan/21 text-neon-cyan shadow-[0_0_8px_rgba(0,240,255,0.1)] hover:shadow-[0_0_13px_rgba(0,240,255,0.3)]';
 
   return (
     <div className="flex flex-wrap items-center gap-8 relative z-10 my-13">
-      <div className="flex items-center gap-5 mr-8">
-        <span className={`text-[9px] caps-modern uppercase font-bold tracking-widest ${colorTheme === 'magenta' ? 'text-neon-magenta/55' : 'text-neon-cyan/55'}`}>
-          BYPASS CENSORSHIP:
-        </span>
-      </div>
-
-      <a 
-        href={`https://api.whatsapp.com/send?text=${getText()}%20-%20Read%20truth%20on:%20${getUrl()}`}
+      <span className="text-[9px] caps-modern uppercase font-bold tracking-widest text-neon-cyan/55 mr-8">SHARE:</span>
+      <a
+        href={`https://api.whatsapp.com/send?text=${text}%0A%0A${url}`}
         target="_blank"
         rel="noopener noreferrer"
-        className={`p-8 border rounded-full transition-all ${themeClasses}`} 
-        title="Route via WhatsApp"
+        className={`p-8 border rounded-full transition-all ${themeClasses}`}
+        title="Share on WhatsApp"
         aria-label="Share on WhatsApp"
       >
         <MessageCircle className="w-13 h-13" />
       </a>
-
-      <a 
-        href={`https://t.me/share/url?url=${getUrl()}&text=${getText()}`}
+      <a
+        href={`https://t.me/share/url?url=${url}&text=${text}`}
         target="_blank"
         rel="noopener noreferrer"
-        className={`p-8 border rounded-full transition-all ${themeClasses}`} 
-        title="Route via Telegram"
+        className={`p-8 border rounded-full transition-all ${themeClasses}`}
+        title="Share on Telegram"
         aria-label="Share on Telegram"
       >
         <Send className="w-13 h-13" />
       </a>
-
-      <button 
-        onClick={handleCopy} 
-        className={`px-13 py-5 border rounded-full text-[10px] caps-modern flex items-center gap-8 transition-all ${themeClasses}`}
-      >
-        {copied ? <><Check className="w-13 h-13" /> COPIED MESSAGE</> : <><Copy className="w-13 h-13" /> COPY SIGNAL</>}
+      <button onClick={handleCopy} className={`px-13 py-5 border rounded-full text-[10px] caps-modern flex items-center gap-8 transition-all ${themeClasses}`}>
+        {copied ? <><Check className="w-13 h-13" /> COPIED</> : <><Copy className="w-13 h-13" /> COPY TEXT</>}
       </button>
     </div>
   );

@@ -1,7 +1,6 @@
-
-import { db, auth, resilientGetDocs } from './firebase';
-import { collection, addDoc, query, where, orderBy, getDocs, doc, setDoc, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
-import { Message } from './firebase';
+import { db, auth, resilientGetDocs, toDate, Message } from './firebase';
+import { collection, query, where, doc, getDoc, serverTimestamp, writeBatch, Timestamp } from 'firebase/firestore';
+import { shareConversation } from './api';
 
 export interface Conversation {
   id: string;
@@ -9,147 +8,181 @@ export interface Conversation {
   title: string;
   lastMessageAt: Date | Timestamp;
   updatedAt: Date | Timestamp;
+  createdAt?: Date | Timestamp;
 }
 
-export async function saveMessage(chatId: string, message: Message) {
+const MAX_TITLE = 200;
+const MAX_TEXT = 100_000;
+
+/** Conversations this browser already knows exist (so we only create each one once). */
+const knownConversations = new Set<string>();
+/** Saves to the same conversation run one after another, so the "create" never races itself. */
+const saveQueues = new Map<string, Promise<unknown>>();
+
+function titleFrom(text: string): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return 'New conversation';
+  return clean.length > 60 ? `${clean.slice(0, 57)}...` : clean;
+}
+
+async function writeMessage(chatId: string, message: Message): Promise<boolean> {
   const user = auth.currentUser;
-  if (!user) return;
+  if (!user) return false;
 
-  const msgData = {
-    ...message,
+  const chatRef = doc(db, 'conversations', chatId);
+  const msgRef = message.id && /^[A-Za-z0-9_-]{1,128}$/.test(message.id)
+    ? doc(collection(chatRef, 'messages'), message.id)
+    : doc(collection(chatRef, 'messages'));
+
+  // Only the keys the security rules allow; Firestore rejects `undefined` values.
+  const msgData: Record<string, unknown> = {
+    id: msgRef.id,
+    role: message.role === 'model' ? 'model' : 'user',
+    text: String(message.text || '').slice(0, MAX_TEXT),
     userId: user.uid,
-    timestamp: message.timestamp || serverTimestamp(),
-    createdAt: serverTimestamp()
+    timestamp: serverTimestamp(),
+    createdAt: serverTimestamp(),
   };
+  if (typeof message.index === 'number') msgData.index = message.index;
+  if (typeof message.hash === 'string') msgData.hash = message.hash;
+  if (typeof message.previousHash === 'string') msgData.previousHash = message.previousHash;
 
-  try {
-    const batch = writeBatch(db);
-    
-    const chatRef = doc(db, 'conversations', chatId);
-    const messagesRef = doc(collection(chatRef, 'messages')); // Generate auto-ID locally
-    
-    // 1. Establish/Update conversation metadata (The Block Envelope)
+  let exists = knownConversations.has(chatId);
+  if (!exists) {
+    try {
+      exists = (await getDoc(chatRef)).exists();
+    } catch {
+      // The rules deny reading a conversation that does not exist yet ("resource" is null), so treat it as new.
+      exists = false;
+    }
+  }
+
+  const batch = writeBatch(db);
+  if (!exists) {
+    // First message: create the conversation. The title comes from the first user message and is never overwritten.
     batch.set(chatRef, {
       id: chatId,
       userId: user.uid,
-      title: message.role === 'user' ? message.text.substring(0, 50) : 'Arthashastra Response',
+      title: (message.role === 'user' ? titleFrom(message.text) : 'New conversation').slice(0, MAX_TITLE),
       lastMessageAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    }, { merge: true });
-
-    // 2. Write the message into the ledger atomically
-    batch.set(messagesRef, {
-      ...msgData,
-      id: messagesRef.id // Ensure ID consistency
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
     });
-    
-    await batch.commit();
-    console.log(`[ChatStore] Atomic Witness Committed: ${chatId} -> ${messagesRef.id}`);
-    
-  } catch (error) {
-    console.error('[ChatStore] Error saving message:', error);
+  } else {
+    batch.update(chatRef, { lastMessageAt: serverTimestamp(), updatedAt: serverTimestamp() });
   }
+  batch.set(msgRef, msgData);
+  await batch.commit();
+  knownConversations.add(chatId);
+  return true;
 }
+
+/**
+ * Saves one chat message (and creates the conversation on first use).
+ * Resolves to true when stored, false when the user is signed out or the write failed.
+ */
+export function saveMessage(chatId: string, message: Message): Promise<boolean> {
+  const previous = saveQueues.get(chatId) || Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(() => writeMessage(chatId, message))
+    .catch((error) => {
+      console.error('[ChatStore] Could not save message:', error);
+      return false;
+    });
+  saveQueues.set(chatId, next);
+  next.finally(() => {
+    if (saveQueues.get(chatId) === next) saveQueues.delete(chatId);
+  });
+  return next;
+}
+
+const millis = (v: unknown) => toDate(v)?.getTime() ?? 0;
 
 export async function getConversations(): Promise<Conversation[]> {
   const user = auth.currentUser;
   if (!user) return [];
 
   try {
-    const q = query(
-      collection(db, 'conversations'),
-      where('userId', '==', user.uid)
-    );
-    
-    // Use resilient version to handle transient "client is offline" errors.
-    // We return ALL conversations for the user and filter client-side to avoid 
-    // the requirement for Firestore composite indices which cause hard sync failures.
+    // No orderBy: avoids needing a composite index. Sorted on the client instead.
+    const q = query(collection(db, 'conversations'), where('userId', '==', user.uid));
     const snap = await resilientGetDocs(q, 5);
-    const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Conversation));
-    
-    console.info(`[ChatStore] Witness Archive Sync: ${data.length} threads synchronized for node ${user.uid.substring(0, 5)}...`);
-    
-    return data.sort((a, b) => {
-      const getVal = (v: any) => {
-        if (!v) return 0;
-        if (v?.seconds) return v.seconds * 1000;
-        if (v instanceof Date) return v.getTime();
-        const parsed = new Date(v).getTime();
-        return isNaN(parsed) ? 0 : parsed;
-      };
-      return getVal(b.lastMessageAt) - getVal(a.lastMessageAt);
-    });
+    const data: Conversation[] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() } as Conversation));
+    data.forEach((c) => knownConversations.add(c.id));
+    return data.sort((a, b) => millis(b.lastMessageAt) - millis(a.lastMessageAt));
   } catch (error) {
-    console.error('[ChatStore] Neural Link Archive Retrieval Failure:', error);
+    console.error('[ChatStore] Could not load conversations:', error);
     return [];
   }
 }
 
 export async function getMessages(chatId: string): Promise<Message[]> {
   try {
-    const q = query(
-      collection(db, 'conversations', chatId, 'messages')
-    );
-    // Use resilient version for message loading
-    const snap = await resilientGetDocs(q);
-    const msgs = snap.docs.map(d => {
-      const data = d.data();
+    const snap = await resilientGetDocs(query(collection(db, 'conversations', chatId, 'messages')));
+    const msgs = snap.docs.map((d: any) => {
+      const data = d.data({ serverTimestamps: 'estimate' });
       return {
-        id: d.id,
-        role: data.role,
-        text: data.text,
-        index: data.index,
-        hash: data.hash,
-        previousHash: data.previousHash,
-        timestamp: data.timestamp || data.createdAt,
-        createdAt: data.createdAt // Keep original for sorting
-      } as Message & { createdAt: any };
-    });
-
-    // Sort client-side to avoid index requirements
-    return msgs.sort((a, b) => {
-      const getTime = (ca: any) => {
-        if (!ca) return 0;
-        if (ca.seconds) return ca.seconds * 1000;
-        return new Date(ca).getTime() || 0;
+        message: {
+          id: d.id,
+          role: data.role,
+          text: data.text,
+          index: data.index,
+          hash: data.hash,
+          previousHash: data.previousHash,
+          timestamp: data.timestamp || data.createdAt,
+        } as Message,
+        sortKey: millis(data.createdAt || data.timestamp),
       };
-      return getTime(a.createdAt) - getTime(b.createdAt);
-    }).map(({ createdAt, ...rest }) => rest as Message);
-    
+    });
+    if (msgs.length) knownConversations.add(chatId);
+    return msgs.sort((a: any, b: any) => a.sortKey - b.sortKey).map((m: any) => m.message);
   } catch (error) {
-    console.error('[ChatStore] Error fetching message history:', error);
+    console.error('[ChatStore] Could not load messages:', error);
     return [];
   }
 }
 
-export async function createSharedTranscript(messages: Message[]): Promise<string> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('Not authenticated');
-
-  const sharedId = crypto.randomUUID();
-  const sharedRef = doc(db, 'shared_transcripts', sharedId);
-  
-  await setDoc(sharedRef, {
-    id: sharedId,
-    userId: user.uid,
-    messages: JSON.stringify(messages),
-    createdAt: serverTimestamp()
-  });
-
-  return sharedId;
+/**
+ * Publishes a read-only share link for a stored conversation.
+ * The server builds the transcript from the saved messages, so nothing can be forged.
+ * Returns the share id (the page lives at /share/<id>).
+ */
+export async function createSharedTranscript(conversationId: string): Promise<string> {
+  const { id } = await shareConversation(conversationId);
+  return id;
 }
 
-export async function getSharedTranscript(sharedId: string): Promise<Message[]> {
+export interface SharedTranscriptData {
+  id: string;
+  title: string;
+  createdAt: Date | null;
+  messages: { role: 'user' | 'model'; text: string }[];
+}
+
+/** Reads a public share link. Works for logged-out visitors. Returns null if missing or unreadable. */
+export async function getSharedTranscript(sharedId: string): Promise<SharedTranscriptData | null> {
+  if (!sharedId) return null;
   try {
-    const { getDocFromServer } = await import('firebase/firestore');
-    const docSnap = await getDocFromServer(doc(db, 'shared_transcripts', sharedId));
-    if (!docSnap.exists()) {
-      return [];
+    const snap = await getDoc(doc(db, 'shared_transcripts', sharedId));
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    let parsed: unknown = [];
+    try {
+      parsed = typeof data.messages === 'string' ? JSON.parse(data.messages) : data.messages;
+    } catch {
+      parsed = [];
     }
-    const data = docSnap.data();
-    return JSON.parse(data.messages) as Message[];
+    const messages = (Array.isArray(parsed) ? parsed : [])
+      .filter((m: any) => m && typeof m.text === 'string')
+      .map((m: any) => ({ role: m.role === 'model' ? 'model' : 'user', text: m.text } as const));
+    return {
+      id: snap.id,
+      title: typeof data.title === 'string' && data.title ? data.title : 'Arthashastra AI conversation',
+      createdAt: toDate(data.createdAt),
+      messages,
+    };
   } catch (error) {
-    console.error('[ChatStore] Error fetching shared transcript:', error);
-    return [];
+    console.error('[ChatStore] Could not load shared transcript:', error);
+    return null;
   }
 }
