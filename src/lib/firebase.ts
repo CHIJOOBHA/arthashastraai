@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react';
 import { initializeApp, setLogLevel } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, onAuthStateChanged, type User } from 'firebase/auth';
 import {
   getFirestore,
   getDoc,
@@ -232,4 +233,20 @@ export interface AgentLog {
   action: string;
   status: string;
   timestamp: string;
+}
+
+// ---------- React helper ----------
+
+/**
+ * Returns the signed-in user. If the parent passes `user` (even null), that value is
+ * used; if it passes nothing (undefined), this subscribes to Firebase Auth itself.
+ */
+export function useAuthUser(propUser?: User | null): User | null {
+  const [authUser, setAuthUser] = useState<User | null>(() => auth.currentUser);
+  const controlled = propUser !== undefined;
+  useEffect(() => {
+    if (controlled) return;
+    return onAuthStateChanged(auth, setAuthUser);
+  }, [controlled]);
+  return controlled ? propUser ?? null : authUser;
 }

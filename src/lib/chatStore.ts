@@ -57,12 +57,31 @@ async function writeMessage(chatId: string, message: Message): Promise<boolean> 
     }
   }
 
+  try {
+    await commitMessage(chatRef, msgRef, msgData, exists, message, user.uid, chatId);
+  } catch {
+    // If the existence check was wrong (e.g. a network blip), retry once with the other path.
+    await commitMessage(chatRef, msgRef, msgData, !exists, message, user.uid, chatId);
+  }
+  knownConversations.add(chatId);
+  return true;
+}
+
+async function commitMessage(
+  chatRef: ReturnType<typeof doc>,
+  msgRef: ReturnType<typeof doc>,
+  msgData: Record<string, unknown>,
+  exists: boolean,
+  message: Message,
+  uid: string,
+  chatId: string,
+) {
   const batch = writeBatch(db);
   if (!exists) {
     // First message: create the conversation. The title comes from the first user message and is never overwritten.
     batch.set(chatRef, {
       id: chatId,
-      userId: user.uid,
+      userId: uid,
       title: (message.role === 'user' ? titleFrom(message.text) : 'New conversation').slice(0, MAX_TITLE),
       lastMessageAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -73,8 +92,6 @@ async function writeMessage(chatId: string, message: Message): Promise<boolean> 
   }
   batch.set(msgRef, msgData);
   await batch.commit();
-  knownConversations.add(chatId);
-  return true;
 }
 
 /**

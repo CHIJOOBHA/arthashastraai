@@ -253,9 +253,9 @@ export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
                   <div className="flex items-center justify-center gap-34 mt-21 w-full">
                     <div className="hidden md:block flex-1 h-[1px] bg-neon-cyan/21" />
                     <div className="flex flex-wrap items-center justify-center gap-13 md:gap-21">
-                      <span className="text-11 caps-modern text-neon-cyan/89 tracking-[0.21em] italic">AI-generated summary of linked news reports</span>
-                      <span className="text-11 caps-modern text-parchment/34 hidden md:inline">|</span>
-                      <span className="text-11 caps-modern text-neon-cyan/89 tracking-[0.21em]">{formatDate(chronicle.date || selectedDate)}</span>
+                      <span className="text-[11px] caps-modern text-neon-cyan/89 tracking-[0.21em] italic">AI-generated summary of linked news reports</span>
+                      <span className="text-[11px] caps-modern text-parchment/34 hidden md:inline">|</span>
+                      <span className="text-[11px] caps-modern text-neon-cyan/89 tracking-[0.21em]">{formatDate(chronicle.date || selectedDate)}</span>
                     </div>
                     <div className="hidden md:block flex-1 h-[1px] bg-neon-cyan/21" />
                   </div>
