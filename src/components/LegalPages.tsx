@@ -172,7 +172,7 @@ export const TermsPage: React.FC = () => (
 
     <LegalSection title="2. AI-generated content — please read">
       <List>
-        <li>Answers, verdicts, reports and news summaries on this service are written by an AI model (Google Gemini) and are labelled AI-generated.</li>
+        <li>Answers, verdicts, reports and news summaries on this service are written by AI models (Anthropic Claude, with Google Gemini as a backup) and are labelled AI-generated.</li>
         <li>AI can be wrong, incomplete, out of date or biased, and can misread its sources. We do not guarantee the accuracy, completeness or timeliness of any content.</li>
         <li>Where the AI used web sources, links are listed under “Sources”. Always check the sources yourself before relying on or sharing anything.</li>
         <li>
@@ -301,8 +301,9 @@ export const PrivacyPage: React.FC = () => (
       <List>
         <li><strong>Google Firebase / Google Cloud</strong> — sign-in, database and hosting of your data.</li>
         <li>
-          <strong>Google Gemini API</strong> — to produce answers, your question (and recent messages in that chat or debate) is sent to
-          Google to generate the reply. Do not include sensitive personal information in questions.
+          <strong>Anthropic (Claude API)</strong> and, as a backup, <strong>Google Gemini API</strong> — to produce answers, your question
+          (and recent messages in that chat or debate) is sent to the AI provider, which also runs web searches to find sources. Do not include
+          sensitive personal information in questions.
         </li>
         <li><strong>Razorpay</strong> — payment processing.</li>
         <li><strong>Our web hosting provider</strong> (e.g. Vercel) — serving the website and API.</li>

@@ -137,3 +137,121 @@ test("agent rotation covers every desk exactly once per day", () => {
   }
   assert.ok(SUBTOPIC_BLOCKS.every((b) => !/srikakulam|andhra/i.test(b.name + b.focus)));
 });
+
+// ---------------------------------------------------------------------------
+// The brain: citations, unsupported-figure warnings, Claude provider.
+// (These inject a fake Claude client, so they run last.)
+// ---------------------------------------------------------------------------
+const ai = await import("../server/ai.ts");
+
+test("citations: supported spans get inline [n] links; unsupported figures are flagged", () => {
+  const sources = [
+    { title: "RBI notice", url: "https://rbi.org.in/a" },
+    { title: "Reuters", url: "https://www.reuters.com/b" },
+  ];
+  const spans = [
+    { text: "The RBI capped ATM fees at ₹23 per withdrawal from May 2025.", cites: [0, 1] },
+    { text: " Banks earned ₹5,000 crore from these fees last year.", cites: [] },
+    { text: "\n\n**Counter-Tweet:** Check your bank statement every month.", cites: [] },
+  ];
+  const md = ai.finalAnswer({ spans, sources, searchQueries: ["atm fee cap rbi"] });
+  assert.match(md, /2025\. \[\[1\]\]\(https:\/\/rbi\.org\.in\/a\)\[\[2\]\]\(https:\/\/www\.reuters\.com\/b\)/);
+  assert.match(md, /Not matched to a source/);
+  assert.match(md, /Banks earned ₹5,000 crore/);
+  // The Counter-Tweet line is never flagged and stays intact.
+  assert.match(md, /\*\*Counter-Tweet:\*\* Check your bank statement every month\./);
+  assert.doesNotMatch(md.split("Not matched")[1], /Counter-Tweet/);
+});
+
+test("unsupportedClaims: restated cited figures and calculations are not flagged; new figures are", () => {
+  const out = ai.unsupportedClaims([
+    { text: "The cap is ₹23 per withdrawal from 2025.", cites: [0] },
+    { text: "\n## What is claimed\nWhich country are you in? So ₹23 is the legal maximum.\nSo ₹23 + ₹4.14 = ₹27.14 in total.\nIn 2024 wages grew 9% in nominal terms.\n- 5% of loans went bad.\nParty X got 6,000 crore.", cites: [] },
+  ]);
+  assert.deepEqual(out, ["In 2024 wages grew 9% in nominal terms.", "5% of loans went bad.", "Party X got 6,000 crore."]);
+});
+
+test("sourceLabel replaces junk page titles with the site name", () => {
+  assert.equal(ai.sourceLabel({ title: "March 28, 2025 6:10 PM", url: "https://www.newsonair.gov.in/x" }), "newsonair.gov.in");
+  assert.equal(ai.sourceLabel({ title: "ATM withdrawals to cost more", url: "https://www.business-standard.com/a" }), "ATM withdrawals to cost more (business-standard.com)");
+});
+
+/** A fake Anthropic client returning web-search citations, with one pause_turn continuation. */
+function fakeClaude(calls: any[]) {
+  const reply = (n: number): any =>
+    n === 0
+      ? { stop_reason: "pause_turn", content: [{ type: "server_tool_use", name: "web_search", input: { query: "india cpi september 2026" } }] }
+      : {
+          stop_reason: "end_turn",
+          content: [
+            { type: "text", text: "India's CPI inflation was 3.1% in September 2026.", citations: [{ type: "web_search_result_location", url: "https://mospi.gov.in/cpi", title: "MoSPI CPI", cited_text: "3.1%" }] },
+            { type: "text", text: "\n\nVerdict: Supported (High confidence).\n\n**Counter-Tweet:** Official CPI: 3.1% in Sept 2026.", citations: [] },
+          ],
+        };
+  return {
+    messages: {
+      async create(params: any) {
+        calls.push(params);
+        return reply(calls.length - 1);
+      },
+      stream(params: any) {
+        calls.push(params);
+        const msg = reply(calls.length - 1);
+        let onText: ((t: string) => void) | null = null;
+        return {
+          on(evt: string, cb: (t: string) => void) {
+            if (evt === "text") onText = cb;
+            return this;
+          },
+          async finalMessage() {
+            for (const b of msg.content as any[]) if (b.type === "text") onText?.(b.text);
+            return msg;
+          },
+        };
+      },
+    },
+  };
+}
+
+test("Claude provider: Opus first, adaptive thinking, web search, continues after pause_turn, keeps citations", async () => {
+  const calls: any[] = [];
+  ai.__setClaudeClientForTests(fakeClaude(calls));
+  const r = await ai.generate("What was India's CPI in Sept 2026?", { system: "sys", grounded: true });
+  assert.equal(r.provider, "claude");
+  assert.equal(calls[0].model, "claude-opus-5-5");
+  assert.deepEqual(calls[0].thinking, { type: "adaptive" });
+  assert.equal(calls[0].output_config.effort, "high");
+  assert.equal(calls[0].tools[0].type, "web_search_20250305");
+  assert.equal(calls.length, 2, "should continue after pause_turn");
+  assert.equal(calls[1].messages.at(-1).role, "assistant");
+  assert.deepEqual(r.searchQueries, ["india cpi september 2026"]);
+  assert.deepEqual(r.sources, [{ title: "MoSPI CPI", url: "https://mospi.gov.in/cpi" }]);
+  const md = ai.finalAnswer(r);
+  assert.match(md, /3\.1% in September 2026\. \[\[1\]\]\(https:\/\/mospi\.gov\.in\/cpi\)/);
+  assert.doesNotMatch(md, /Not matched to a source/);
+});
+
+test("Claude provider: light tier uses Haiku; streaming yields text then the cited result", async () => {
+  const calls: any[] = [];
+  ai.__setClaudeClientForTests(fakeClaude(calls));
+  await ai.generate("x", { system: "s", tier: "light" });
+  assert.equal(calls[0].model, "claude-haiku-5-5");
+
+  const calls2: any[] = [];
+  ai.__setClaudeClientForTests(fakeClaude(calls2));
+  let done: any = null;
+  let streamed = "";
+  for await (const t of ai.generateStream("q", { system: "s", grounded: true }, (r) => (done = r))) streamed += t;
+  assert.match(streamed, /3\.1% in September 2026/);
+  assert.ok(done);
+  assert.equal(done.sources.length, 1);
+});
+
+test("agents: dates must be recent and real", async () => {
+  const { isRecent } = await import("../server/agents.ts");
+  const now = Date.parse("2026-11-01T00:00:00Z");
+  assert.equal(isRecent("2026-10-20", 35, now), true);
+  assert.equal(isRecent("2026-08-01", 35, now), false);
+  assert.equal(isRecent("2027-01-01", 35, now), false);
+  assert.equal(isRecent("not a date", 35, now), false);
+});

@@ -92,7 +92,7 @@ export function DataSovereignty({ user: userProp }: DataSovereigntyProps) {
             {[
               { title: 'No lock-in', text: 'One click gives you everything stored for your account as a plain JSON file: conversations, memory-calendar days, cold archives, share links and your audit log.' },
               { title: 'Where it is stored', text: 'Your data is stored in Google Cloud Firestore under your account. Security rules let only you read your private conversations. It is not end-to-end encrypted.' },
-              { title: 'No data selling', text: 'We do not sell your data or show you ads. Your messages are sent to the AI provider (Google Gemini) to generate answers.' },
+              { title: 'No data selling', text: 'We do not sell your data or show you ads. Your messages are sent to our AI provider (Anthropic Claude, or Google Gemini as a backup) to generate answers.' },
               { title: 'Right to erasure', text: 'You can delete all of your stored conversations and notes yourself, below. Payment records are kept by law.' },
             ].map((p) => (
               <div key={p.title} className="p-13 bg-void/34 border-l-2 border-cyan-500/55 group hover:bg-cyan-900/10 transition-colors">

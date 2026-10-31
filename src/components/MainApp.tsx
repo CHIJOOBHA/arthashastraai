@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 
 import { auth, db, handleFirestoreError, OperationType, signInAnonymous, signInWithGoogle, signOut, type AgentLog } from '../lib/firebase';
-import { ApiError, getHealth, getMe, runAgentCycle, streamChat, type ChatTurn, type Health, type Me } from '../lib/api';
+import { ApiError, FINAL_MARKER, getHealth, getMe, runAgentCycle, streamChat, type ChatTurn, type Health, type Me } from '../lib/api';
 import { saveMessage, getMessages, getConversations, createSharedTranscript } from '../lib/chatStore';
 import { witnessBlock } from '../lib/aitihya';
 import { SUPPORTED_LANGUAGES, getTranslation } from '../translations';
@@ -406,8 +406,13 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
 
     let fullText = '';
     try {
+      let raw = '';
       for await (const chunk of streamChat(history, text, langName)) {
-        fullText += chunk;
+        raw += chunk;
+        // The server first streams a live draft, then FINAL_MARKER + the final answer
+        // with inline [n] citations, sources and warnings. Show the final version once it arrives.
+        const cut = raw.indexOf(FINAL_MARKER);
+        fullText = cut === -1 ? raw : raw.slice(cut + 1);
         const snapshot = fullText;
         setMessages((prev) => prev.map((m) => (m.id === modelId ? { ...m, text: snapshot } : m)));
       }

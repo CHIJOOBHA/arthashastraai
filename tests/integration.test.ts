@@ -35,27 +35,44 @@ const fakeSources = [
 function fakeResponse(text: string, grounded: boolean) {
   return {
     text,
-    candidates: [{ groundingMetadata: grounded ? { groundingChunks: fakeSources, webSearchQueries: ["bank fees 2026"] } : undefined }],
+    candidates: [
+      {
+        groundingMetadata: grounded
+          ? {
+              groundingChunks: fakeSources,
+              webSearchQueries: ["bank fees 2026"],
+              groundingSupports: [{ segment: { text: "Evidence shows the fee is real." }, groundingChunkIndices: [0, 1] }],
+            }
+          : undefined,
+      },
+    ],
   };
 }
+const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
 function answerFor(prompt: string): string {
-  if (prompt.includes("Search the web for 2 recent reports")) {
+  if (prompt.includes("Search the web for up to 3 recent reports")) {
     return JSON.stringify([
-      { headline: "Bank fined for hidden card fees", whatHappened: "Regulator fined Bank X 5 million for undisclosed fees.", country: "UK", date: "2026-10-20", sourceUrl: "https://www.reuters.com/a" },
-      { headline: "Made-up story", whatHappened: "Something unverifiable.", country: "Nowhere", date: "2026-10-21", sourceUrl: "https://example.com" },
+      { headline: "Bank fined for hidden card fees", whatHappened: "Regulator fined Bank X 5 million for undisclosed fees.", country: "UK", date: daysAgo(5), sourceUrl: "https://www.reuters.com/a" },
+      { headline: "Made-up story", whatHappened: "Something unverifiable.", country: "Nowhere", date: daysAgo(3), sourceUrl: "https://www.reuters.com/z" },
+      { headline: "Invented source", whatHappened: "Cites a page that was never retrieved.", country: "X", date: daysAgo(2), sourceUrl: "https://not-retrieved.example/x" },
+      { headline: "Stale story", whatHappened: "Too old.", country: "X", date: daysAgo(400), sourceUrl: "https://www.reuters.com/old" },
     ]);
   }
-  if (prompt.includes("Independently fact-check")) {
+  if (prompt.includes("Fact-check each claim below")) {
     return JSON.stringify([
-      { index: 0, verdict: "confirmed", note: "Reuters and the regulator confirm the fine." },
-      { index: 1, verdict: "unverified", note: "No source found." },
+      { index: 0, verdict: "corrected", correctedText: "Regulator fined Bank X 4.8 million for undisclosed card fees.", sourceUrls: ["https://www.rbi.org.in/b"], note: "Fine was 4.8 million, not 5 million." },
+      { index: 1, verdict: "unverified", sourceUrls: [], note: "No source found." },
     ]);
   }
-  if (prompt.includes("explain it for an ordinary person")) {
-    return JSON.stringify([{ index: 0, impact: "Customers paid fees they were never told about.", whoBenefits: "The bank.", whatYouCanDo: "Check statements and complain to the ombudsman.", severity: "High" }]);
+  if (prompt.includes("Explain each verified report below")) {
+    return JSON.stringify([{ index: 0, direction: "protection", effectOnPeople: "Customers may get refunds of fees they were never told about.", otherSide: "The bank says the fees were in its terms.", whatYouCanDo: "Check statements and complain to the ombudsman.", severity: "High" }]);
   }
-  if (prompt.includes("Gazette")) {
-    return JSON.stringify({ headline: "Fees, fines and food prices", summary: "Three stories.", stories: [{ title: "Bank fined", whatHappened: "A bank was fined.", whoPays: "Customers.", region: "UK" }] });
+  if (prompt.includes("Write the Gazette")) {
+    return JSON.stringify({
+      headline: "Fees, fines and food prices",
+      summary: "Three stories.",
+      stories: [{ title: "Bank fined", whatHappened: "A bank was fined.", effectOnPeople: "Customers may get refunds.", region: "UK", date: daysAgo(1), sourceUrl: "https://www.reuters.com/a" }],
+    });
   }
   return "Evidence shows the fee is real.\n\n**Counter-Tweet:** Check your statement.";
 }
@@ -129,6 +146,11 @@ test("chat streams an answer with real source links appended", { skip }, async (
   assert.match(res.text, /Evidence shows the fee is real/);
   assert.match(res.text, /\*\*Sources\*\*/);
   assert.match(res.text, /reuters\.com/);
+  // Draft first, then the final answer with inline citations after the marker.
+  const final = res.text.split("\u001e")[1];
+  assert.ok(final, "final cited answer is sent after the marker");
+  assert.match(final, /Evidence shows the fee is real\. \[\[1\]\]\(https:\/\/www\.reuters\.com\/a\)\[\[2\]\]/);
+  assert.match(final, /\*\*Counter-Tweet:\*\*/);
 });
 
 test("daily quota is enforced per user (anonymous limit 2)", { skip }, async () => {
@@ -157,9 +179,17 @@ test("agent cycle publishes ONLY independently verified items, with sources, and
   const headlines = intel.docs.map((d: any) => d.get("headline"));
   assert.ok(headlines.includes("Bank fined for hidden card fees"));
   assert.ok(!headlines.includes("Made-up story"), "unverified item must not be published");
+  assert.ok(!headlines.includes("Invented source"), "items citing pages that were never retrieved are dropped");
+  assert.ok(!headlines.includes("Stale story"), "old items are dropped");
   const item = intel.docs.find((d: any) => d.get("headline") === "Bank fined for hidden card fees");
   assert.ok(item.get("sources").length >= 1);
-  assert.match(item.get("metadata").confidence, /Confirmed/);
+  assert.match(item.get("metadata").confidence, /Corrected & confirmed · 2 independent sources/);
+  assert.equal(item.get("metadata").direction, "protection");
+  // The corrected text (4.8 million) is what gets explained and published, not the collector's 5 million.
+  const exp = await db.collection("explanations").doc(item.get("explanationId")).get();
+  assert.match(exp.get("content"), /4\.8 million/);
+  // The fact-check note may mention the wrong figure; the story text itself must not.
+  assert.doesNotMatch(exp.get("content").split("**Fact-check:**")[0], /\b5 million/);
 
   // Re-running does not duplicate stories.
   await request(app).get("/api/cron/run-cycle?budgetMs=100000").set("Authorization", "Bearer test_cron_secret");
@@ -291,7 +321,10 @@ test("gazette is generated once per day and cached", { skip }, async () => {
   const first = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.equal(first.body.status, "ready");
-  assert.ok(first.body.sources.length >= 1);
+  assert.ok(first.body.sources.length >= 2);
+  assert.equal(first.body.stories.length, 1);
+  assert.equal(first.body.stories[0].verdict, "corrected");
+  assert.ok(first.body.stories[0].sources.length >= 2);
   const second = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
   assert.equal(second.body.headline, first.body.headline);
 });

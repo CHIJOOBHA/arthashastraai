@@ -172,7 +172,7 @@ const en = {
 
   // Admin
   healthTitle: 'Server health',
-  healthAi: 'AI (Gemini key)',
+  healthAi: 'AI brain (Claude or Gemini key)',
   healthDb: 'Database (Firebase Admin)',
   healthPayments: 'Payments (Razorpay)',
   healthOk: 'OK',

@@ -51,6 +51,9 @@ export const config = {
 
   geminiKey:
     env("GEMINI_API_KEY") || env("USER_GEMINI_KEY") || env("GOOGLE_API_KEY"),
+  anthropicKey: env("ANTHROPIC_API_KEY"),
+  /** Which AI to use first when both keys are set: "claude" (default) or "gemini". */
+  aiProvider: (process.env.AI_PROVIDER || "claude").trim().toLowerCase() === "gemini" ? "gemini" : "claude",
 
   firebase: {
     projectId:

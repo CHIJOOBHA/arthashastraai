@@ -5,8 +5,12 @@ import { chronicleToday, Source } from './api';
 export interface ChronicleStory {
   title: string;
   whatHappened: string;
-  whoPays: string;
+  /** How ordinary people are affected (older editions stored this as whoPays). */
+  effectOnPeople: string;
   region: string;
+  verdict?: 'confirmed' | 'corrected';
+  verificationNote?: string;
+  sources: Source[];
 }
 
 export interface Chronicle {
@@ -21,6 +25,11 @@ export interface Chronicle {
 }
 
 const str = (v: unknown, fallback = '') => (typeof v === 'string' ? v : fallback);
+
+const cleanSources = (v: unknown): Source[] =>
+  (Array.isArray(v) ? v : [])
+    .filter((s: any) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
+    .map((s: any) => ({ title: str(s.title, s.url) || s.url, url: s.url }));
 
 /** Turns any stored/returned document into a safe Chronicle (missing fields never crash the UI). */
 export function normalizeChronicle(raw: any, fallbackId = ''): Chronicle {
@@ -38,12 +47,13 @@ export function normalizeChronicle(raw: any, fallbackId = ''): Chronicle {
       .map((s: any) => ({
         title: str(s.title),
         whatHappened: str(s.whatHappened),
-        whoPays: str(s.whoPays),
+        effectOnPeople: str(s.effectOnPeople, str(s.whoPays)),
         region: str(s.region, 'Global') || 'Global',
+        verdict: s.verdict === 'confirmed' || s.verdict === 'corrected' ? s.verdict : undefined,
+        verificationNote: str(s.verificationNote) || undefined,
+        sources: cleanSources(s.sources),
       })),
-    sources: (Array.isArray(r.sources) ? r.sources : [])
-      .filter((s: any) => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url))
-      .map((s: any) => ({ title: str(s.title, s.url) || s.url, url: s.url })),
+    sources: cleanSources(r.sources),
     createdAt: r.createdAt,
   };
 }
