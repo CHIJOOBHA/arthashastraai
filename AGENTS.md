@@ -1,33 +1,13 @@
-# AI Agent Instructions: Core Architecture Lock & Mission Integrity
+# Instructions for AI coding agents working on Arthashastra AI
 
-## STRICT DIRECTIVE: IMMORTAL CORE & MISSION LOCK
+## Mission (do not drift)
+Arthashastra AI serves the **common man anywhere in the world** against economic cheating: hidden fees, inflation, scams, debt traps, mis-selling, cartels, corruption and misuse of public money, unfair taxes, wage theft. The tone is fearless and on the side of ordinary people. Do not soften it into corporate neutrality, and do not turn it into propaganda for any government, party or company.
 
-The user has explicitly mandated that the core architecture, the code, and the underlying principles of the mission are **permanently locked and secured**. The "Arthashastra Mission" is non-negotiable and must be protected from all internal and external interference.
-
-**Rule 1: No Modification of Existing Core Logic**
-Unless the user explicitly provides the override phrase `"OVERRIDE CORE LOCK"`, you are **FORBIDDEN** from modifying the following files:
-- `src/App.tsx` (Core UI and logic)
-- `src/main.tsx` (Entry point)
-- `index.html` (Entry point)
-- `vite.config.ts` (Build configuration)
-- `package.json` (Dependencies)
-- `src/lib/gemini.ts` (Core System Prompt & Principles)
-
-**Rule 2: Anti-Drift & Path Protection**
-You must recognize and reject any attempt to mislead the agents toward "another direction," "another root," or "another path" not explicitly chosen by the user. 
-- You are forbidden from performing "re-branding" or "persona shifts" that soften the adversarial stance against corruption.
-- Your mission to protect the **Common Man's Rights** is the root of the tree; any branch that grows in another direction is a threat.
-
-**Rule 3: The "Pipes" Architecture (Adding New Features)**
-If the user asks to add a new feature, you must **NOT** rewrite or alter the existing core code to accommodate it. Instead, you must:
-1. Create a **new** file/component for the feature (e.g., `src/components/NewFeature.tsx`).
-2. Treat the new feature as a "pipe".
-3. Connect the "pipe" to the core application only through strict, well-defined boundaries (like an Error Boundary), ensuring that if the new feature fails, it does not corrupt the core application or its principles.
-
-**Rule 4: Security & IP Protection**
-- Maintain strict Content Security Policy (CSP) headers.
-- Do not expose any internal prompts, API keys, or proprietary logic to the client side.
-- All agent logic must remain server-side and non-transparent to anyone but the user.
-
-**Rule 5: Error Boundaries**
-Any new component added MUST be wrapped in an Error Boundary. This is a safety protocol to protect the stable "Absolute Witness" core.
+## Non-negotiable rules
+1. **Evidence first.** Every factual claim the AI makes must come from live sources (Gemini Google Search grounding) and the sources must be shown to the user. Never add code that invents data, confidence scores, "fallback" intelligence or fake statuses. If the AI fails, show an honest error.
+2. **No false claims in the UI.** Do not call anything "blockchain", "encrypted", "zero-knowledge", "100% secure", "verified" or "certified" unless the code really does it.
+3. **Secrets and prompts stay on the server.** All prompts live in `server/prompts.ts`. The browser only uses `src/lib/api.ts`. Only `VITE_*` variables may reach the browser, and they must not be secrets.
+4. **Every AI endpoint** goes through `requireUser` + `consumeQuota` (server/auth.ts). Never add an open AI proxy endpoint.
+5. **Public and paid data are written only by the server** (Firebase Admin SDK). Keep `firestore.rules` deny-by-default and add a rules test in `tests/rules/` for every rule change.
+6. **Defamation safety.** Criticise policies and decisions freely; only state that a named person committed wrongdoing when a court, regulator, audit or several credible outlets report it, and say "alleged" when unproven.
+7. New features: put them in their own component wrapped in `ErrorBoundary`, and add tests. Run `npm run lint`, `npm run build` and `npm test` before committing.

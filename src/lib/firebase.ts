@@ -1,223 +1,136 @@
+import { useEffect, useState } from 'react';
 import { initializeApp, setLogLevel } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  getDoc, 
-  setDoc, 
-  onSnapshot, 
-  query, 
-  orderBy, 
-  limit, 
-  addDoc, 
-  serverTimestamp, 
-  Timestamp, 
-  getDocFromServer,
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, onAuthStateChanged, type User } from 'firebase/auth';
+import {
+  getFirestore,
+  getDoc,
   getDocs,
-  getDocsFromServer,
-  getDocFromCache,
-  getDocsFromCache,
-  enableIndexedDbPersistence
+  DocumentData,
+  DocumentReference,
+  DocumentSnapshot,
+  Query,
+  QuerySnapshot,
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
 
-// Merged configuration with placeholder detection.
-const isPlaceholder = (val: string | undefined) => !val || val.includes('MY_FIREBASE') || val === '';
+// Configuration comes from VITE_FIREBASE_* environment variables.
+// AI Studio's firebase-applet-config.json is used only if it exists (it is optional,
+// so a missing file does not break the build).
+const appletFiles = import.meta.glob('../../firebase-applet-config.json', { eager: true, import: 'default' }) as Record<string, Record<string, string>>;
+const firebaseConfig: Record<string, string | undefined> = Object.values(appletFiles)[0] || {};
+
+const isPlaceholder = (val: string | undefined) => !val || val.includes('MY_FIREBASE') || val.trim() === '';
+const pick = (fileVal: string | undefined, envVal: string | undefined) => (!isPlaceholder(envVal) ? envVal : !isPlaceholder(fileVal) ? fileVal : undefined);
 
 const finalConfig = {
-  apiKey: !isPlaceholder(firebaseConfig.apiKey) ? firebaseConfig.apiKey : import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: !isPlaceholder(firebaseConfig.authDomain) ? firebaseConfig.authDomain : import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: !isPlaceholder(firebaseConfig.projectId) ? firebaseConfig.projectId : (import.meta.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0592321618"),
-  storageBucket: !isPlaceholder(firebaseConfig.storageBucket) ? firebaseConfig.storageBucket : import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: !isPlaceholder(firebaseConfig.messagingSenderId) ? firebaseConfig.messagingSenderId : import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: !isPlaceholder(firebaseConfig.appId) ? firebaseConfig.appId : import.meta.env.VITE_FIREBASE_APP_ID,
-  firestoreDatabaseId: !isPlaceholder(firebaseConfig.firestoreDatabaseId) ? firebaseConfig.firestoreDatabaseId : import.meta.env.VITE_FIREBASE_DATABASE_ID
+  apiKey: pick(firebaseConfig.apiKey, import.meta.env.VITE_FIREBASE_API_KEY),
+  authDomain: pick(firebaseConfig.authDomain, import.meta.env.VITE_FIREBASE_AUTH_DOMAIN),
+  projectId: pick(firebaseConfig.projectId, import.meta.env.VITE_FIREBASE_PROJECT_ID),
+  storageBucket: pick(firebaseConfig.storageBucket, import.meta.env.VITE_FIREBASE_STORAGE_BUCKET),
+  messagingSenderId: pick(firebaseConfig.messagingSenderId, import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID),
+  appId: pick(firebaseConfig.appId, import.meta.env.VITE_FIREBASE_APP_ID),
+  firestoreDatabaseId: pick(firebaseConfig.firestoreDatabaseId, import.meta.env.VITE_FIREBASE_DATABASE_ID),
 };
 
-console.log('[Firebase] Neural Link Config:', {
-  project: finalConfig.projectId,
-  database: finalConfig.firestoreDatabaseId || '(default)',
-  isPlaceholder: isPlaceholder(finalConfig.projectId)
-});
-
-// Automatic project ID detection for AI Studio
-// In most cases, we should trust the provisioned firebase-applet-config.json.
-// We only switch if we are explicitly in a placeholder state.
+// AI Studio preview hosts look like "ais-dev-<project>-<n>.<domain>". When no project
+// ID is configured there, the project ID can be read from the hostname.
 if (isPlaceholder(finalConfig.projectId) && typeof window !== 'undefined') {
-  const host = window.location.hostname;
-  const aisMatch = host.match(/^(ais-(?:dev|pre)-[a-z0-9-]+)-\d+\./);
+  const aisMatch = window.location.hostname.match(/^(ais-(?:dev|pre)-[a-z0-9-]+)-\d+\./);
   if (aisMatch) {
     const detectedId = aisMatch[1];
-    console.log(`[Firebase] Placeholder detected. Auto-assigning project ID from hostname: ${detectedId}`);
     finalConfig.projectId = detectedId;
     finalConfig.authDomain = `${detectedId}.firebaseapp.com`;
     finalConfig.storageBucket = `${detectedId}.firebasestorage.app`;
   }
 }
 
-// Initialize Firebase safely
+export const firebaseConfigured = !isPlaceholder(finalConfig.projectId) && !isPlaceholder(finalConfig.apiKey);
+if (!firebaseConfigured) {
+  console.warn('[Firebase] Not configured: set the VITE_FIREBASE_* environment variables.');
+}
+
 let app;
 try {
-  app = initializeApp(isPlaceholder(finalConfig.projectId) ? { apiKey: "none", projectId: "none" } : finalConfig);
+  app = initializeApp(isPlaceholder(finalConfig.projectId) ? { apiKey: 'none', projectId: 'none' } : finalConfig);
   setLogLevel('silent');
 } catch (e) {
-  console.error("[Firebase] Init fail:", e);
-  app = initializeApp({ apiKey: "none", projectId: "none" });
+  console.error('[Firebase] Initialisation failed:', e);
+  app = initializeApp({ apiKey: 'none', projectId: 'none' });
 }
 
 export const auth = getAuth(app);
 const databaseId = !isPlaceholder(finalConfig.firestoreDatabaseId) ? finalConfig.firestoreDatabaseId : undefined;
-// Define a mutable reference for the firestore instance
-export let db = getFirestore(app, (databaseId === "(default)" || databaseId === "default") ? undefined : databaseId);
+export const db = getFirestore(app, databaseId === '(default)' || databaseId === 'default' ? undefined : databaseId);
 
 /**
- * Neural Link Synchronization
- * Allows the client to align its database connection with the server's findings.
+ * Kept for backwards compatibility. The client no longer switches databases at
+ * runtime based on a server response; the database is fixed by configuration.
  */
-export async function syncNeuralLink() {
-  try {
-    const response = await fetch('/api/health');
-    const health = await response.json();
-    
-    if (health.databaseId && health.databaseId !== (databaseId || '(default)')) {
-      console.warn(`[Firebase] Neural Link Mismatch. Server: ${health.databaseId}, Client: ${databaseId || '(default)'}. Re-aligning...`);
-      const targetId = (health.databaseId === "(default)" || health.databaseId === "default") ? undefined : health.databaseId;
-      db = getFirestore(app, targetId);
-    }
-  } catch (e) {
-    console.warn('[Firebase] Neural link sync failed:', e);
-  }
+export async function syncNeuralLink(): Promise<void> {
+  return;
 }
 
-// Enable Offline Persistence for a smoother neural link
-if (typeof window !== 'undefined') {
-  /*
-  enableIndexedDbPersistence(db).catch((err) => {
-    if (err.code === 'failed-precondition') {
-      console.warn('[Firebase] Multiple tabs open, persistence can only be enabled in one tab at a time.');
-    } else if (err.code === 'unimplemented') {
-      console.warn('[Firebase] The current browser does not support all of the features required to enable persistence');
-    }
-  });
-  */
-}
+// ---------- resilient reads ----------
+// Only transient errors are retried. Permission, missing-index and other
+// permanent errors are rethrown so callers can show them instead of an empty list.
+const TRANSIENT_CODES = new Set(['unavailable', 'deadline-exceeded']);
+const isTransient = (e: unknown) => {
+  const code = (e as { code?: string } | null)?.code;
+  return typeof code === 'string' && TRANSIENT_CODES.has(code);
+};
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Resilient GetDoc helper.
- * Handles transient "offline" or network errors by preferring any available data.
- * Falls back to cache explicitly if network is unavailable.
- */
-export async function resilientGetDoc(docRef: any, maxRetries = 3): Promise<any> {
+export async function resilientGetDoc<T = DocumentData>(docRef: DocumentReference<T>, maxRetries = 3): Promise<DocumentSnapshot<T>> {
   let delay = 500;
-  for (let i = 0; i < maxRetries; i++) {
+  for (let attempt = 1; ; attempt++) {
     try {
-      // First attempt: standard getDoc (cache + network)
       return await getDoc(docRef);
-    } catch (e: any) {
-      const errorMsg = e.message?.toLowerCase() || "";
-      const isOffline = errorMsg.includes("offline") || 
-                        errorMsg.includes("unavailable") || 
-                        e.code === 'unavailable' ||
-                        e.code === 'failed-precondition';
-      
-      if (isOffline) {
-        // Try cache immediately if we detect offline/connectivity issues
-        try {
-          return await getDocFromCache(docRef);
-        } catch (cacheErr) {
-          // If not even in cache, we continue retrying network if possible
-          if (i < maxRetries - 1) {
-            await new Promise(resolve => setTimeout(resolve, delay));
-            delay *= 2;
-            continue;
-          }
-        }
-      }
-      
-      if (i < maxRetries - 1 && !isOffline) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 2;
-        continue;
-      }
-      
-      // Final attempt: if still failing and offline, we return a mock 'empty' snapshot 
-      // rather than throwing a blocking error.
-      if (i === maxRetries - 1) {
-        console.info("[Firebase] Neural link idle. Serving empty-state for offline integrity.");
-        return { id: docRef.id, exists: () => false, data: () => null };
-      }
-      throw e;
+    } catch (e) {
+      if (!isTransient(e) || attempt >= maxRetries) throw e;
+      await sleep(delay);
+      delay *= 2;
     }
   }
 }
 
-/**
- * Resilient GetDocs helper.
- * Handles transient network issues for collection queries.
- */
-export async function resilientGetDocs(q: any, maxRetries = 3): Promise<any> {
+export async function resilientGetDocs<T = DocumentData>(q: Query<T>, maxRetries = 3): Promise<QuerySnapshot<T>> {
   let delay = 500;
-  for (let i = 0; i < maxRetries; i++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await getDocs(q);
-    } catch (e: any) {
-      const errorMsg = e.message?.toLowerCase() || "";
-      const isOffline = errorMsg.includes("offline") || e.code === 'unavailable';
-      
-      if (isOffline) {
-        try {
-          return await getDocsFromCache(q);
-        } catch (cacheErr) {
-          if (i < maxRetries - 1) {
-            await new Promise(resolve => setTimeout(resolve, delay));
-            delay *= 2;
-            continue;
-          }
-        }
-      }
-
-      if (i < maxRetries - 1 && !isOffline) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 2;
-        continue;
-      }
-      
-      if (i === maxRetries - 1) {
-        return { docs: [], empty: true, size: 0 };
-      }
-      throw e;
+    } catch (e) {
+      if (!isTransient(e) || attempt >= maxRetries) throw e;
+      await sleep(delay);
+      delay *= 2;
     }
   }
 }
 
-// Proactive Link Warmup (Resolves 'client is offline' race conditions)
-// We use getDoc (which handles cache/offline) instead of getDocFromServer for the probe
-if (!isPlaceholder(finalConfig.projectId)) {
-  const warmUp = async () => {
-    try {
-      await getDoc(doc(db, '_internal', 'auth_probe'));
-    } catch (e: any) {
-      // Silently consume warmup failures
-    }
-  };
-  warmUp();
-}
-
+// ---------- auth helpers ----------
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-// Auth Helpers
-export const signInWithGoogle = () => {
-  return signInWithPopup(auth, googleProvider);
-};
-
-export const signInAnonymous = () => {
-  return signInAnonymously(auth);
-};
+export const signInWithGoogle = () => signInWithPopup(auth, googleProvider);
+export const signInAnonymous = () => signInAnonymously(auth);
 export const signOut = () => auth.signOut();
 
-// Error Handling
+/** Authorization header for calls to our own server. Every AI endpoint requires it. */
+export async function authHeaders(): Promise<Record<string, string>> {
+  const u = auth.currentUser;
+  if (!u) throw new Error('AUTH_REQUIRED');
+  return { Authorization: `Bearer ${await u.getIdToken()}` };
+}
+
+/** Converts Firestore Timestamps, {seconds,nanoseconds} maps, ISO strings, millis or Dates into a Date (or null). */
+export function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  if (typeof value.toDate === 'function') return value.toDate();
+  if (typeof value.seconds === 'number') return new Date(value.seconds * 1000 + Math.floor((value.nanoseconds || 0) / 1e6));
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// ---------- error handling ----------
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -229,73 +142,50 @@ export enum OperationType {
 
 export interface FirestoreErrorInfo {
   error: string;
+  code: string | undefined;
   operationType: OperationType;
   path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-    tenantId: string | null | undefined;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
+  userId: string | undefined;
+  isAnonymous: boolean | undefined;
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+/**
+ * Logs a Firestore error without crashing the app. Transient network noise is
+ * ignored; everything else (including permission-denied) is logged with console.error
+ * so it is never hidden. Callers that need to inform the user should also show a message.
+ */
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): FirestoreErrorInfo | null {
   const errorMessage = error instanceof Error ? error.message : String(error);
-  const lowMsg = errorMessage.toLowerCase();
-  
-  // Ignore benign idle stream timeouts and transient network errors 
+  const code = (error as { code?: string } | null)?.code;
+  const low = errorMessage.toLowerCase();
+
   if (
-    lowMsg.includes('disconnecting idle stream') || 
-    lowMsg.includes('cancelled') ||
-    lowMsg.includes('auth/network-request-failed') ||
-    lowMsg.includes('network-request-failed') ||
-    lowMsg.includes('code=unavailable') ||
-    lowMsg.includes('offline') ||
-    lowMsg.includes('unavailable') ||
-    lowMsg.includes('fetching auth token failed')
+    code === 'cancelled' ||
+    low.includes('disconnecting idle stream') ||
+    low.includes('network-request-failed')
   ) {
-    return;
+    return null;
   }
 
-  const errInfo: FirestoreErrorInfo = {
+  const info: FirestoreErrorInfo = {
     error: errorMessage,
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
+    code,
     operationType,
-    path
+    path,
+    userId: auth.currentUser?.uid,
+    isAnonymous: auth.currentUser?.isAnonymous,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  
-  // Only log for permission denied errors to avoid white screen during boot
-  if (errorMessage.includes('Missing or insufficient permissions') || errorMessage.includes('permission-denied')) {
-    if (path === 'intelligence') {
-      console.warn('[Firebase] Intelligence feed delayed (access-syncing). Neural link will retry.');
-      return;
-    }
-    console.error('Permission Denied Error (Suppressed for boot):', JSON.stringify(errInfo));
-    // throw new Error(JSON.stringify(errInfo));
+  if (code === 'unavailable' || code === 'deadline-exceeded') {
+    console.warn('[Firestore] Temporarily unavailable:', info);
+  } else if (code === 'permission-denied') {
+    console.error('[Firestore] Permission denied:', info);
+  } else {
+    console.error('[Firestore] Error:', info);
   }
+  return info;
 }
 
-// Types
+// ---------- types ----------
 export interface Message {
   id: string;
   role: 'user' | 'model';
@@ -343,4 +233,20 @@ export interface AgentLog {
   action: string;
   status: string;
   timestamp: string;
+}
+
+// ---------- React helper ----------
+
+/**
+ * Returns the signed-in user. If the parent passes `user` (even null), that value is
+ * used; if it passes nothing (undefined), this subscribes to Firebase Auth itself.
+ */
+export function useAuthUser(propUser?: User | null): User | null {
+  const [authUser, setAuthUser] = useState<User | null>(() => auth.currentUser);
+  const controlled = propUser !== undefined;
+  useEffect(() => {
+    if (controlled) return;
+    return onAuthStateChanged(auth, setAuthUser);
+  }, [controlled]);
+  return controlled ? propUser ?? null : authUser;
 }

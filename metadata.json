@@ -1,6 +1,6 @@
 {
-  "name": "Remix: Arthashastra-AI",
-  "description": "A world-class expert in global economics and institutional intelligence, featuring autonomous agents for real-time data collection, Twitter monitoring, and AI-driven engagement.",
+  "name": "Arthashastra AI",
+  "description": "The economic witness for ordinary people worldwide: sourced, plain-language answers on how people are cheated, plus verified daily intelligence.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

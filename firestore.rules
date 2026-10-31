@@ -1,216 +1,167 @@
 rules_version = '2';
+
+// Arthashastra AI — Firestore security rules.
+// Principle: the server (Firebase Admin SDK) writes everything public or
+// money-related. Admin SDK writes bypass these rules. Browsers may only touch
+// their own private data, plus public debates with strict validation.
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // --- GLOBAL HELPERS ---
-    function isSignedIn() { return request.auth != null; }
-    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }
-    function isAdmin() { 
-      return isSignedIn() && (
-        (request.auth.token.email == 'jhansidharmana222@gmail.com') ||
-        (request.auth.token.email == 'chitti.bhargav3@gmail.com') ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin')
-      ); 
-    }
-    function incoming() { return request.resource.data; }
-    function existing() { return resource.data; }
-    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
-    function isServerTimestamp(ts) { return ts == request.time; }
 
-    // --- VALIDATION BLUEPRINTS ---
-    
-    function isValidUser(data) {
-      return data.keys().hasAll(['uid', 'email', 'role']) &&
-             data.keys().size() >= 3 &&
-             data.uid == request.auth.uid &&
-             data.email is string && data.email.size() <= 256 &&
-             (data.role == 'user' || (data.role == 'admin' && (data.email == 'jhansidharmana222@gmail.com' || data.email == 'chitti.bhargav3@gmail.com')));
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function isUser(uid) { return signedIn() && request.auth.uid == uid; }
+    function isRealUser() { return signedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous'; }
+    // Admins: custom claim `admin: true` (set with scripts/set-admin.ts) or the owner's verified email.
+    function isAdmin() {
+      return signedIn() && (
+        request.auth.token.get('admin', false) == true ||
+        (request.auth.token.get('email', '') == 'chitti.bhargav3@gmail.com' &&
+         request.auth.token.get('email_verified', false) == true)
+      );
     }
+    function data() { return request.resource.data; }
+    function onlyKeys(allowed) { return data().keys().hasOnly(allowed); }
+    function changedOnly(allowed) { return data().diff(resource.data).affectedKeys().hasOnly(allowed); }
+    function str(v, max) { return v is string && v.size() <= max; }
+    function validId(id) { return id is string && id.size() <= 128 && id.matches('^[A-Za-z0-9_-]+$'); }
 
-    function isValidDebate(data) {
-      return data.keys().hasAll(['id', 'userId', 'userName', 'userArgument', 'createdAt', 'status']) &&
-             data.id is string && data.id.size() <= 128 &&
-             data.userId == request.auth.uid &&
-             data.userName is string && data.userName.size() <= 100 &&
-             data.userArgument is string &&
-             data.status in ['pending', 'resolved'] &&
-             data.createdAt == request.time;
-    }
-
-    function isValidMessage(data) {
-      return data.keys().hasAll(['id', 'role', 'text', 'userId', 'hash', 'index']) &&
-             data.id is string && data.id.size() <= 128 &&
-             data.role is string &&
-             data.text is string && data.text.size() <= 100000 &&
-             data.userId == request.auth.uid &&
-             data.hash is string && data.hash.size() == 64 &&
-             data.index is int;
-    }
-
-    function isValidConversation(data) {
-      return data.keys().hasAll(['id', 'userId', 'title']) &&
-             data.id is string &&
-             data.userId == request.auth.uid &&
-             data.title is string && data.title.size() <= 200;
-    }
-
-    function isValidThreatMatrix(data) {
-      return data.keys().hasAll(['content', 'timestamp', 'agentReportsUsed']) &&
-             data.keys().size() == 3 &&
-             data.content is string && data.content.size() <= 100000 &&
-             data.timestamp == request.time &&
-             data.agentReportsUsed is bool;
-    }
-
-    // --- MATCH BLOCKS ---
-    
-    match /_health_/{id} {
-      allow read, write: if true;
-    }
-
-    // Default Deny
+    // ---------- default: deny ----------
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // PUBLIC READ-ONLY COLLECTIONS
+    // ---------- public, server-written ----------
     match /intelligence/{id} {
       allow read: if true;
-      allow write: if true; // Allow write for Admin as well as server Client SDK fallback seeding
     }
-
-    match /tweets/{id} {
-      allow read: if isSignedIn();
-      allow write: if false;
-    }
-
-    match /responses/{id} {
-      allow read: if isSignedIn();
-      allow write: if false;
-    }
-
     match /chronicles/{id} {
-      allow read: if isSignedIn();
-      allow write: if false;
+      allow read: if true; // the daily Gazette is public so share links work
     }
-
     match /threat_matrices/{id} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidThreatMatrix(incoming());
-      allow update, delete: if false;
+      allow read: if signedIn();
     }
-
     match /ledger/{id} {
-      allow read: if isSignedIn();
-      allow write: if true; // Allow write for Client SDK ledger logs
+      allow read: if signedIn();
     }
-
     match /agent_block_ledger/{id} {
-      allow read: if isSignedIn();
-      allow write: if true; // Allow write for Client SDK agent ledger logs
+      allow read: if signedIn();
     }
+    // explanations are served through the server paywall (/api/explanations/:id) only.
 
-    match /shared_transcripts/{id} {
-      allow read: if true; // Publicly shared
-      allow write: if false;
-    }
-
-    // USER-SPECIFIC COLLECTIONS
-    match /users/{uid} {
-      // Split PII: email is sensitive.
-      // Blanket reads forbidden.
-      allow get: if isOwner(uid) || isAdmin();
-      allow list: if false; 
-      
-      allow create: if isOwner(uid) && isValidUser(incoming());
-      allow update: if (isOwner(uid) || isAdmin()) && (
-        // Users can't change their own role
-        (incoming().diff(existing()).affectedKeys().hasOnly(['email', 'explanationViewCount', 'isSubscribed']) && incoming().role == existing().role) ||
-        isAdmin()
-      );
-    }
-
-    match /subscriptions/{uid} {
-      allow get: if isOwner(uid) || isAdmin();
-      allow list: if isAdmin();
-      allow write: if false; // System managed
-    }
-
-    match /payments/{id} {
-      allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
-      allow list: if isAdmin();
-      allow write: if false; // System managed
-    }
-
-    match /conversations/{id} {
-      allow read: if isOwner(existing().userId) || isAdmin();
-      allow create: if isSignedIn() && isValidConversation(incoming());
-      allow update: if (isOwner(existing().userId) || isAdmin()) && 
-                    incoming().diff(existing()).affectedKeys().hasOnly(['id', 'userId', 'title', 'lastMessageAt', 'updatedAt']) &&
-                    incoming().id == existing().id &&
-                    incoming().userId == existing().userId;
-      allow delete: if isOwner(existing().userId) || isAdmin();
-    }
-
-    match /conversations/{id}/messages/{msgId} {
-      allow read: if (exists(/databases/$(database)/documents/conversations/$(id)) && isOwner(get(/databases/$(database)/documents/conversations/$(id)).data.userId)) || isAdmin();
-      allow create: if isSignedIn() && 
-                    (!exists(/databases/$(database)/documents/conversations/$(id)) || get(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid) &&
-                    isValidMessage(incoming());
-      allow update, delete: if false; // Messages are immutable blocks
-    }
-
-    match /debates/{id} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidDebate(incoming());
-      allow update: if isSignedIn() && (
-        isAdmin() ||
-        // Users can only increment likesCount
-        (incoming().diff(existing()).affectedKeys().hasOnly(['likesCount']) && 
-         incoming().userId == existing().userId) // In a real app, likes would be in a subcollection
-      );
-    }
-
-    match /debates/{id}/chat/{msgId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && 
-                    incoming().keys().hasAll(['id', 'userId', 'role', 'text', 'createdAt']) &&
-                    incoming().id == msgId &&
-                    incoming().userId == request.auth.uid &&
-                    incoming().role in ['user', 'model'] &&
-                    incoming().text is string &&
-                    incoming().createdAt == request.time;
-      allow update, delete: if isAdmin();
-    }
-
-    // SYSTEM COLLECTIONS
+    // ---------- admin-only, server-written ----------
     match /agent_logs/{id} {
+      allow read: if isAdmin();
+    }
+
+    // ---------- the user's own account (server-written) ----------
+    match /users/{uid} {
+      allow get: if isUser(uid) || isAdmin();
+    }
+    match /subscriptions/{uid} {
+      allow get: if isUser(uid) || isAdmin();
       allow list: if isAdmin();
-      allow get: if isAdmin();
-      allow write: if true; // Allowed for Server Client SDK logging fallback
+    }
+    match /payments/{id} {
+      allow get: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isAdmin();
+    }
+    match /usage/{id} {
+      allow get: if signedIn() && resource.data.uid == request.auth.uid;
     }
 
-    match /audit_log/{id} {
-      allow read: if isAdmin();
-      allow write: if false;
+    // ---------- private chats ----------
+    match /conversations/{id} {
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if validId(id) && signedIn() &&
+        onlyKeys(['id', 'userId', 'title', 'lastMessageAt', 'updatedAt', 'createdAt']) &&
+        data().userId == request.auth.uid && data().id == id && str(data().title, 200);
+      allow update: if signedIn() && resource.data.userId == request.auth.uid &&
+        changedOnly(['title', 'lastMessageAt', 'updatedAt']) && str(data().title, 200);
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+
+      function ownsConversation() {
+        return signedIn() &&
+          getAfter(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid;
+      }
+
+      match /messages/{msgId} {
+        allow read: if signedIn() &&
+          (get(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid || isAdmin());
+        allow create: if ownsConversation() &&
+          onlyKeys(['id', 'role', 'text', 'userId', 'index', 'hash', 'previousHash', 'timestamp', 'createdAt']) &&
+          data().userId == request.auth.uid &&
+          data().role in ['user', 'model'] &&
+          str(data().text, 100000);
+        // Messages are never edited, but the owner may delete them (right to erasure / archiving).
+        allow delete: if signedIn() &&
+          get(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid;
+      }
     }
 
-    match /explanations/{id} {
-      allow read: if isSignedIn();
-      allow write: if true; // Allowed for Server Client SDK explanation generation
+    // Public share links. Created by the server from stored messages (POST /api/share),
+    // so nobody can publish forged AI answers. The owner may delete their link.
+    match /shared_transcripts/{id} {
+      allow read: if true;
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
     }
 
-    match /cold_archives/{id} {
-      allow read: if isAdmin();
-      allow write: if false;
-    }
-
+    // Personal day-by-day memory blocks. Doc id = "<uid>_<YYYY-MM-DD>".
     match /temporal_blocks/{id} {
-      allow read, create, update, delete: if isSignedIn() && id.startsWith(request.auth.uid + "_");
+      allow get, delete: if signedIn() && id.matches(request.auth.uid + '_.*');
+      allow list: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create, update: if signedIn() && id.matches(request.auth.uid + '_.*') &&
+        data().userId == request.auth.uid;
     }
 
-    match /config/{id} {
-      allow read, write: if false; // Highly sensitive
+    // Personal cold storage of old conversations.
+    match /cold_archives/{id} {
+      allow read, delete: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create: if signedIn() && data().userId == request.auth.uid;
+    }
+
+    // Personal audit trail of archive actions.
+    match /audit_log/{id} {
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if signedIn() && data().userId == request.auth.uid &&
+        onlyKeys(['userId', 'action', 'details', 'timestamp']) && str(data().action, 100);
+    }
+
+    // ---------- the Arena (public debates) ----------
+    match /debates/{id} {
+      allow read: if signedIn();
+      allow create: if validId(id) && isRealUser() &&
+        onlyKeys(['id', 'userId', 'userName', 'userArgument', 'createdAt', 'status', 'likesCount']) &&
+        data().id == id &&
+        data().userId == request.auth.uid &&
+        str(data().userName, 100) &&
+        str(data().userArgument, 20000) && data().userArgument.size() > 0 &&
+        data().status == 'pending' &&
+        data().get('likesCount', 0) == 0 &&
+        data().createdAt == request.time;
+      // A like = +1 on likesCount together with creating likes/{uid} (one per user).
+      allow update: if isRealUser() && changedOnly(['likesCount']) &&
+        data().likesCount == resource.data.get('likesCount', 0) + 1 &&
+        !exists(/databases/$(database)/documents/debates/$(id)/likes/$(request.auth.uid)) &&
+        existsAfter(/databases/$(database)/documents/debates/$(id)/likes/$(request.auth.uid));
+      allow delete: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+
+      match /likes/{uid} {
+        allow read: if signedIn();
+        allow create: if isUser(uid) && isRealUser() && onlyKeys(['createdAt']) && data().createdAt == request.time;
+      }
+
+      // Users post their own messages; AI ("model") replies are written by the server only.
+      match /chat/{msgId} {
+        allow read: if signedIn();
+        allow create: if validId(msgId) && isRealUser() &&
+          onlyKeys(['id', 'userId', 'userName', 'role', 'text', 'createdAt']) &&
+          data().id == msgId &&
+          data().userId == request.auth.uid &&
+          data().role == 'user' &&
+          str(data().text, 2000) && data().text.size() > 0 &&
+          data().createdAt == request.time;
+        allow delete: if isAdmin();
+      }
     }
   }
 }

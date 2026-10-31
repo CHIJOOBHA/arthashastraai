@@ -1,15 +1,27 @@
-import { db, auth, resilientGetDocs } from './firebase';
-import { 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  getDocs, 
-  query, 
-  where, 
-  serverTimestamp 
+import { db, auth, resilientGetDoc, resilientGetDocs, toDate } from './firebase';
+import {
+  collection,
+  doc,
+  deleteDoc,
+  query,
+  where,
+  runTransaction,
+  serverTimestamp,
+  writeBatch,
 } from 'firebase/firestore';
 import { getMessages } from './chatStore';
+
+/**
+ * Personal day-by-day notes ("temporal blocks"). One Firestore document per day:
+ * temporal_blocks/{uid}_{YYYY-MM-DD}. Inside it, entries form a SHA-256 hash chain
+ * (each entry's hash covers its index, role, time, text and the previous hash), so
+ * accidental or manual edits of stored entries are detectable. It is a private,
+ * editable store: you can delete a day at any time. It is not a blockchain.
+ */
+
+export const GENESIS_HASH = 'GENESIS_BLOCK';
+/** Firestore documents are capped at 1 MiB; stay well below. */
+const MAX_DAY_BYTES = 900_000;
 
 export interface MessageBlock {
   id: string;
@@ -18,7 +30,7 @@ export interface MessageBlock {
   text: string;
   hash: string;
   previousHash: string;
-  createdAt: string;
+  createdAt: string; // ISO time
 }
 
 export interface TemporalDayBlock {
@@ -33,233 +45,211 @@ export interface TemporalDayBlock {
   updatedAt?: any;
 }
 
-/**
- * Custom reproducible checksum generator to link message blocks
- * together, acting as an immutable reference chain so agents never forget.
- */
-export function computeMessageHash(index: number, role: string, text: string, prevHash: string): string {
-  const input = `${index}|${role}|${text}|${prevHash}`;
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    const char = input.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
+export interface NewEntry {
+  id?: string;
+  role: 'user' | 'model' | 'system';
+  text: string;
+  createdAt?: string;
+}
+
+function requireUser() {
+  const user = auth.currentUser;
+  if (!user) throw new Error('Please sign in to use your memory calendar.');
+  return user;
+}
+
+function parseDateStr(dateStr: string) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!m) throw new Error(`Invalid date: ${dateStr}`);
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const d = new Date(year, month - 1, day);
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) {
+    throw new Error(`Invalid date: ${dateStr}`);
   }
-  return 'AKSHA_HEX_' + Math.abs(hash).toString(16).toUpperCase().padStart(8, '0');
+  return { year, month, day };
+}
+
+const dayRef = (uid: string, dateStr: string) => doc(db, 'temporal_blocks', `${uid}_${dateStr}`);
+
+/** SHA-256 (hex) of one entry and the hash before it. */
+export async function computeMessageHash(index: number, role: string, createdAt: string, text: string, prevHash: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error('SHA-256 is unavailable in this browser (a secure https page is required).');
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(`${index}|${role}|${createdAt}|${text}|${prevHash}`));
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export interface ChainCheck {
+  valid: boolean;
+  /** First entry whose link or hash does not match, or -1. */
+  errorIndex: number;
+  /** True when entries were written by the old app version (short checksum, not verifiable). */
+  legacy: boolean;
+}
+
+/** Recomputes every link of a day's chain. Never modifies stored data. */
+export async function verifyDayChain(entries: MessageBlock[]): Promise<ChainCheck> {
+  let prev = GENESIS_HASH;
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (typeof e.hash === 'string' && e.hash.startsWith('AKSHA_HEX_')) {
+      return { valid: false, errorIndex: i, legacy: true };
+    }
+    if (e.index !== i || e.previousHash !== prev) return { valid: false, errorIndex: i, legacy: false };
+    const h = await computeMessageHash(i, e.role, e.createdAt, e.text, prev);
+    if (h !== e.hash) return { valid: false, errorIndex: i, legacy: false };
+    prev = e.hash;
+  }
+  return { valid: true, errorIndex: -1, legacy: false };
+}
+
+function toBlock(uid: string, dateStr: string, data: Record<string, any>): TemporalDayBlock {
+  const messageBlocks = (Array.isArray(data.messageBlocks) ? data.messageBlocks : []) as MessageBlock[];
+  messageBlocks.sort((a, b) => a.index - b.index);
+  const parts = parseDateStr(dateStr);
+  return {
+    id: dateStr,
+    userId: uid,
+    ...parts,
+    dateStr,
+    messageBlocks,
+    summary: typeof data.summary === 'string' ? data.summary : '',
+    updatedAt: data.updatedAt,
+  };
 }
 
 /**
- * Fetch a specific day storage block for the current authenticated user
+ * Reads one day. Returns null only when the day does not exist yet.
+ * Any other problem (offline, permission) THROWS, so callers never mistake an
+ * error for an empty day and overwrite it.
  */
 export async function getTemporalDayBlock(dateStr: string): Promise<TemporalDayBlock | null> {
-  const user = auth.currentUser;
-  if (!user) return null;
+  const user = requireUser();
+  const snap = await resilientGetDoc(dayRef(user.uid, dateStr));
+  if (!snap.exists()) return null;
+  return toBlock(user.uid, dateStr, snap.data());
+}
 
-  try {
-    const blockId = `${user.uid}_${dateStr}`;
-    const blockRef = doc(db, 'temporal_blocks', blockId);
-    const snap = await getDoc(blockRef);
-
-    if (snap.exists()) {
-      const data = snap.data();
-      // Ensure messages are sorted by index
-      const messageBlocks = (data.messageBlocks || []) as MessageBlock[];
-      messageBlocks.sort((a, b) => a.index - b.index);
-      return {
-        id: dateStr,
-        userId: user.uid,
-        year: data.year,
-        month: data.month,
-        day: data.day,
-        dateStr: data.dateStr,
-        messageBlocks,
-        summary: data.summary,
-      } as TemporalDayBlock;
-    }
-    return null;
-  } catch (error) {
-    console.error('[TemporalStore] Error fetching day block:', error);
-    return null;
-  }
+/** Creates an empty day if (and only if) it does not exist. Never overwrites. */
+export async function initializeDayBlock(dateStr: string): Promise<void> {
+  const user = requireUser();
+  const parts = parseDateStr(dateStr);
+  const ref = dayRef(user.uid, dateStr);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists()) return;
+    tx.set(ref, { userId: user.uid, ...parts, dateStr, messageBlocks: [], summary: '', updatedAt: serverTimestamp() });
+  });
 }
 
 /**
- * Create or update a specific day block
+ * Appends entries to the end of a day's chain inside a transaction, so two tabs
+ * cannot overwrite each other. Existing entries are never rewritten or re-hashed.
+ * Entries whose id is already in the day are skipped. Returns how many were added.
  */
-export async function saveTemporalDayBlock(block: TemporalDayBlock): Promise<boolean> {
-  const user = auth.currentUser;
-  if (!user) return false;
+export async function appendEntriesToDay(dateStr: string, entries: NewEntry[], summary?: string): Promise<number> {
+  const user = requireUser();
+  const parts = parseDateStr(dateStr);
+  const ref = dayRef(user.uid, dateStr);
 
-  try {
-    const blockId = `${user.uid}_${block.dateStr}`;
-    const blockRef = doc(db, 'temporal_blocks', blockId);
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const existing: MessageBlock[] = snap.exists() ? toBlock(user.uid, dateStr, snap.data()).messageBlocks : [];
+    const knownIds = new Set(existing.map((e) => e.id));
+    const fresh = entries.filter((e) => e.text.trim() && !(e.id && knownIds.has(e.id)));
+    if (!fresh.length) return 0;
 
-    // Verify chain integrity before saving
-    let prevHash = 'GENESIS_BLOCK';
-    const verifiedMessageBlocks = block.messageBlocks.map((msg, idx) => {
-      const calculatedHash = computeMessageHash(idx, msg.role, msg.text, prevHash);
-      const updatedMsg = {
-        ...msg,
-        index: idx,
-        previousHash: prevHash,
-        hash: calculatedHash,
-        createdAt: msg.createdAt || new Date().toISOString()
-      };
-      prevHash = calculatedHash;
-      return updatedMsg;
-    });
+    const added: MessageBlock[] = [];
+    let prev = existing.length ? existing[existing.length - 1].hash : GENESIS_HASH;
+    let index = existing.length;
+    for (const e of fresh) {
+      const createdAt = e.createdAt || new Date().toISOString();
+      const hash = await computeMessageHash(index, e.role, createdAt, e.text, prev);
+      added.push({ id: e.id || crypto.randomUUID(), index, role: e.role, text: e.text, hash, previousHash: prev, createdAt });
+      prev = hash;
+      index++;
+    }
 
-    await setDoc(blockRef, {
+    const all = [...existing, ...added];
+    const bytes = new TextEncoder().encode(JSON.stringify(all)).length;
+    if (bytes > MAX_DAY_BYTES) {
+      throw new Error(`This day would hold about ${Math.round(bytes / 1024)} KB, above the ~${Math.round(MAX_DAY_BYTES / 1000)} KB limit of one day. Use another date for the rest.`);
+    }
+
+    const prevSummary = snap.exists() && typeof snap.data().summary === 'string' ? snap.data().summary : '';
+    tx.set(ref, {
       userId: user.uid,
-      year: block.year,
-      month: block.month,
-      day: block.day,
-      dateStr: block.dateStr,
-      messageBlocks: verifiedMessageBlocks,
-      summary: block.summary || '',
-      updatedAt: serverTimestamp()
-    });
-
-    console.log(`[TemporalStore] Solidified memory block chain for ${block.dateStr} with ${verifiedMessageBlocks.length} links.`);
-    return true;
-  } catch (error) {
-    console.error('[TemporalStore] Error saving temporal block:', error);
-    return false;
-  }
-}
-
-/**
- * Direct insertion of a single connected message block to a day
- */
-export async function addMessageBlockToDay(
-  dateStr: string,
-  role: 'user' | 'model' | 'system',
-  text: string
-): Promise<boolean> {
-  const user = auth.currentUser;
-  if (!user) return false;
-
-  try {
-    let block = await getTemporalDayBlock(dateStr);
-    
-    const dParts = dateStr.split('-');
-    const year = parseInt(dParts[0], 10);
-    const month = parseInt(dParts[1], 10);
-    const day = parseInt(dParts[2], 10);
-
-    if (!block) {
-      block = {
-        id: dateStr,
-        userId: user.uid,
-        year,
-        month,
-        day,
-        dateStr,
-        messageBlocks: []
-      };
-    }
-
-    const nextIndex = block.messageBlocks.length;
-    const prevHash = nextIndex > 0 ? block.messageBlocks[nextIndex - 1].hash : 'GENESIS_BLOCK';
-    const hash = computeMessageHash(nextIndex, role, text, prevHash);
-
-    const newBlock: MessageBlock = {
-      id: crypto.randomUUID(),
-      index: nextIndex,
-      role,
-      text,
-      hash,
-      previousHash: prevHash,
-      createdAt: new Date().toISOString()
-    };
-
-    block.messageBlocks.push(newBlock);
-    return await saveTemporalDayBlock(block);
-  } catch (error) {
-    console.error('[TemporalStore] Error adding message link:', error);
-    return false;
-  }
-}
-
-/**
- * Import a full chat/conversation and chain all its messages chronologically to a day block
- */
-export async function importChatToDayBlock(
-  dateStr: string,
-  chatId: string,
-  title: string
-): Promise<boolean> {
-  const user = auth.currentUser;
-  if (!user) return false;
-
-  try {
-    const rawMessages = await getMessages(chatId);
-    if (!rawMessages || rawMessages.length === 0) {
-      console.warn('[TemporalStore] No messages found in chat to import.');
-      return false;
-    }
-
-    const dParts = dateStr.split('-');
-    const year = parseInt(dParts[0], 10);
-    const month = parseInt(dParts[1], 10);
-    const day = parseInt(dParts[2], 10);
-
-    let prevHash = 'GENESIS_BLOCK';
-    const messageBlocks: MessageBlock[] = rawMessages.map((msg, idx) => {
-      const simpleRole = msg.role === 'user' ? 'user' : 'model';
-      const calculatedHash = computeMessageHash(idx, simpleRole, msg.text, prevHash);
-      const block: MessageBlock = {
-        id: msg.id || crypto.randomUUID(),
-        index: idx,
-        role: simpleRole,
-        text: msg.text,
-        previousHash: prevHash,
-        hash: calculatedHash,
-        createdAt: new Date().toISOString()
-      };
-      prevHash = calculatedHash;
-      return block;
-    });
-
-    const block: TemporalDayBlock = {
-      id: dateStr,
-      userId: user.uid,
-      year,
-      month,
-      day,
+      ...parts,
       dateStr,
-      messageBlocks,
-      summary: `Consolidated memory thread compiled from: "${title}"`
-    };
+      messageBlocks: all,
+      summary: summary ? (prevSummary ? `${prevSummary}\n${summary}` : summary) : prevSummary,
+      updatedAt: serverTimestamp(),
+    });
+    return added.length;
+  });
+}
 
-    return await saveTemporalDayBlock(block);
-  } catch (error) {
-    console.error('[TemporalStore] Chat import failed:', error);
-    return false;
-  }
+/** Appends one entry written by the user. */
+export async function addMessageBlockToDay(dateStr: string, role: 'user' | 'model' | 'system', text: string): Promise<number> {
+  return appendEntriesToDay(dateStr, [{ role, text }]);
 }
 
 /**
- * Load all populated temporal block date strings for UI calendar indication
+ * Copies a conversation's messages to the end of a day, keeping their original
+ * times. Messages already copied to that day are skipped. Returns how many were added.
  */
-export async function getPopulatedBlockDates(): Promise<string[]> {
-  const user = auth.currentUser;
-  if (!user) return [];
+export async function importChatToDayBlock(dateStr: string, chatId: string, title: string): Promise<number> {
+  requireUser();
+  const messages = await getMessages(chatId);
+  if (!messages.length) throw new Error('That conversation has no messages to copy.');
+  const entries: NewEntry[] = messages.map((m) => ({
+    id: `${chatId}:${m.id}`,
+    role: m.role === 'user' ? 'user' : 'model',
+    text: m.text || '',
+    createdAt: (toDate(m.timestamp) || new Date()).toISOString(),
+  }));
+  return appendEntriesToDay(dateStr, entries, `Copied from conversation: "${(title || 'Untitled').slice(0, 120)}"`);
+}
 
-  try {
-    const q = query(
-      collection(db, 'temporal_blocks'),
-      where('userId', '==', user.uid)
-    );
-    const snap = await resilientGetDocs(q);
-    return snap.docs.map(doc => {
-      const parts = doc.id.split('_');
-      // doc.id format is {userId}_{YYYY-MM-DD}
-      // Let's obtain the suffix by joining all parts after the first one and ignoring the prefix.
-      return parts.slice(1).join('_');
-    });
-  } catch (error) {
-    console.error('[TemporalStore] Error listing populated dates:', error);
-    return [];
+/** Permanently deletes one day. */
+export async function deleteDayBlock(dateStr: string): Promise<void> {
+  const user = requireUser();
+  await deleteDoc(dayRef(user.uid, dateStr));
+}
+
+/** All of the user's days (for the calendar dots and for export). Throws on error. */
+export async function getAllTemporalBlocks(): Promise<TemporalDayBlock[]> {
+  const user = requireUser();
+  const snap = await resilientGetDocs(query(collection(db, 'temporal_blocks'), where('userId', '==', user.uid)));
+  return snap.docs
+    .map((d) => {
+      const data = d.data();
+      const dateStr = typeof data.dateStr === 'string' ? data.dateStr : d.id.slice(user.uid.length + 1);
+      try {
+        return toBlock(user.uid, dateStr, data);
+      } catch {
+        return null;
+      }
+    })
+    .filter((b): b is TemporalDayBlock => b !== null)
+    .sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+}
+
+/** Dates (YYYY-MM-DD) that have a stored day. Throws on error. */
+export async function getPopulatedBlockDates(): Promise<string[]> {
+  return (await getAllTemporalBlocks()).map((b) => b.dateStr);
+}
+
+/** Deletes every day of the user. Returns how many were deleted. */
+export async function deleteAllTemporalBlocks(): Promise<number> {
+  const user = requireUser();
+  const snap = await resilientGetDocs(query(collection(db, 'temporal_blocks'), where('userId', '==', user.uid)));
+  for (let i = 0; i < snap.docs.length; i += 450) {
+    const batch = writeBatch(db);
+    snap.docs.slice(i, i + 450).forEach((d) => batch.delete(d.ref));
+    await batch.commit();
   }
+  return snap.size;
 }

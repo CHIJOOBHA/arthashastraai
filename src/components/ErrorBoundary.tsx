@@ -1,4 +1,7 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { Component, ErrorInfo, ReactNode } from 'react';
+import { AlertTriangle, RotateCcw } from 'lucide-react';
+import { getTranslation } from '../translations';
+import { readStoredLanguage } from '../hooks/useLanguage';
 
 interface Props {
   children?: ReactNode;
@@ -7,41 +10,41 @@ interface Props {
 
 interface State {
   hasError: boolean;
-  error: Error | null;
 }
 
+/** Catches a crash in one part of the page and offers a reset, without exposing internals. */
 export class ErrorBoundary extends Component<Props, State> {
-  public state: State = {
-    hasError: false,
-    error: null
-  };
+  public state: State = { hasError: false };
 
-  public static getDerivedStateFromError(error: Error): State {
-    // Update state so the next render will show the fallback UI.
-    return { hasError: true, error };
+  public static getDerivedStateFromError(): State {
+    return { hasError: true };
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('Uncaught error in pipe/component:', error, errorInfo);
+    console.error('[ErrorBoundary] A component crashed:', error, errorInfo.componentStack);
   }
 
-  public render() {
-    if (this.state.hasError) {
-      if (this.props.fallback) {
-        return this.props.fallback;
-      }
-      return (
-        <div className="p-4 m-4 border border-red-500/30 bg-red-500/10 rounded-lg text-red-400 font-mono text-sm">
-          <h2>System Pipe Disconnected</h2>
-          <p>A non-core component failed to load. The core system remains secure and operational.</p>
-          <details className="mt-2 text-xs opacity-70">
-            <summary>Error Details</summary>
-            {this.state.error?.toString()}
-          </details>
-        </div>
-      );
-    }
+  private reset = () => this.setState({ hasError: false });
 
-    return this.props.children;
+  public render() {
+    if (!this.state.hasError) return this.props.children;
+    if (this.props.fallback) return this.props.fallback;
+    const t = getTranslation(readStoredLanguage());
+    return (
+      <div role="alert" className="m-13 p-21 border border-cyber-red/34 bg-cyber-red/5 rounded-13 text-parchment font-sans">
+        <div className="flex items-center gap-8 mb-8 text-cyber-red">
+          <AlertTriangle className="w-21 h-21" aria-hidden />
+          <h2 className="text-13 font-bold uppercase tracking-widest">{t.errorTitle}</h2>
+        </div>
+        <p className="text-13 text-parchment/89 mb-13 leading-relaxed">{t.errorBody}</p>
+        <button
+          onClick={this.reset}
+          className="inline-flex items-center gap-8 px-13 py-8 border border-neon-cyan/55 text-neon-cyan rounded-8 text-[11px] font-bold uppercase tracking-widest hover:bg-neon-cyan/13 transition-colors"
+        >
+          <RotateCcw className="w-13 h-13" aria-hidden />
+          {t.tryAgain}
+        </button>
+      </div>
+    );
   }
 }

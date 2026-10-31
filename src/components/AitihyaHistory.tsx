@@ -1,139 +1,103 @@
-
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { Clock, MessageSquare, ChevronRight, Search, Trash2, Calendar, RefreshCw } from 'lucide-react';
-import { getConversations, Conversation } from '../lib/chatStore';
-import { auth, db } from '../lib/firebase';
-import { Timestamp, collection, query, where, onSnapshot } from 'firebase/firestore';
+import type { User } from 'firebase/auth';
+import { Clock, MessageSquare, ChevronRight, Search, Calendar, RefreshCw } from 'lucide-react';
+import { Conversation } from '../lib/chatStore';
+import { db, toDate, useAuthUser } from '../lib/firebase';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 
 interface AitihyaHistoryProps {
   onSelectConversation: (id: string) => void;
   activeChatId?: string;
   selectedDate: string;
   setSelectedDate: (date: string) => void;
+  user?: User | null;
+  language?: string;
+  isAdmin?: boolean;
 }
 
-export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDate, setSelectedDate }: AitihyaHistoryProps) {
+const getLocalDateString = (d: Date): string =>
+  `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
+
+/** "YYYY-MM-DD" -> local Date (not UTC midnight). */
+const fromLocalDateString = (s: string): Date => {
+  const [y, m, d] = s.split('-').map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+};
+
+const lastActivity = (c: Conversation): Date | null => toDate(c.lastMessageAt) || toDate(c.updatedAt);
+
+export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDate, setSelectedDate, user: userProp }: AitihyaHistoryProps) {
+  const user = useAuthUser(userProp);
+  const uid = user?.uid;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [pickerYear, setPickerYear] = useState(2026);
-  const [pickerMonth, setPickerMonth] = useState(5); // May
-
-  const getLocalDateString = (d: Date): string => {
-    const year = d.getFullYear();
-    const month = (d.getMonth() + 1).toString().padStart(2, '0');
-    const day = d.getDate().toString().padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
+  const [pickerYear, setPickerYear] = useState(() => new Date().getFullYear());
+  const [pickerMonth, setPickerMonth] = useState(() => new Date().getMonth() + 1);
 
   useEffect(() => {
-    if (!auth.currentUser) {
+    if (!uid) {
       setConversations([]);
       setLoading(false);
       return;
     }
-
     setLoading(true);
-    // Real-time listener for conversations belonging to the user
-    // We avoid orderBy here to bypass the requirement for a composite index (uid + lastMessageAt)
-    // which can be slow to provision and cause sync issues.
-    const q = query(
-      collection(db, 'conversations'),
-      where('userId', '==', auth.currentUser.uid)
+    setLoadError(null);
+    // No orderBy: avoids needing a composite index. Sorted on the client.
+    const q = query(collection(db, 'conversations'), where('userId', '==', uid));
+    const unsubscribe = onSnapshot(
+      q,
+      (snap) => {
+        const data = snap.docs.map((d) => ({ ...(d.data({ serverTimestamps: 'estimate' }) as Conversation), id: d.id }));
+        data.sort((a, b) => (lastActivity(b)?.getTime() || 0) - (lastActivity(a)?.getTime() || 0));
+        setConversations(data);
+        setLoading(false);
+      },
+      (err) => {
+        console.error('[AitihyaHistory] Could not load conversations:', err);
+        setLoadError('Could not load your conversations. Please try again.');
+        setLoading(false);
+      },
     );
-
-    const unsubscribe = onSnapshot(q, (snap) => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Conversation));
-      
-      // Sort client-side by lastMessageAt to ensure most recent is always at the top
-      const sorted = data.sort((a, b) => {
-        const getVal = (v: any) => {
-          if (!v) return 0;
-          if (v?.seconds) return v.seconds * 1000;
-          if (v instanceof Date) return v.getTime();
-          const parsed = new Date(v).getTime();
-          return isNaN(parsed) ? 0 : parsed;
-        };
-        return getVal(b.lastMessageAt) - getVal(a.lastMessageAt);
-      });
-
-      setConversations(sorted);
-      setLoading(false);
-    }, (err) => {
-      console.error("[Archive] Real-time Sync Error:", err);
-      setLoading(false);
-    });
-
     return unsubscribe;
-  }, [auth.currentUser, refreshKey]);
+  }, [uid, refreshKey]);
 
-  const filterDays = Array.from(new Set(conversations.map(c => {
-    let d: Date;
-    if (c.lastMessageAt && typeof (c.lastMessageAt as any).toDate === 'function') {
-      d = (c.lastMessageAt as any).toDate();
-    } else if (c.lastMessageAt) {
-      d = new Date(c.lastMessageAt as any);
-    } else {
-      d = new Date();
-    }
-    
-    if (isNaN(d.getTime())) d = new Date();
-    return getLocalDateString(d);
-  }))).sort((a, b) => b.localeCompare(a));
+  const dayOf = (c: Conversation) => {
+    const d = lastActivity(c);
+    return d ? getLocalDateString(d) : 'unknown';
+  };
 
-  const filtered = conversations.filter(c => {
-    const matchesSearch = c.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          c.id.toLowerCase().includes(searchTerm.toLowerCase());
-    
+  const filterDays = Array.from(new Set(conversations.map(dayOf)))
+    .filter((d) => d !== 'unknown')
+    .sort((a, b) => b.localeCompare(a));
+
+  const term = searchTerm.toLowerCase();
+  const filtered = conversations.filter((c) => {
+    const matchesSearch = (c.title || '').toLowerCase().includes(term) || c.id.toLowerCase().includes(term);
     if (!matchesSearch) return false;
     if (selectedDate === 'all') return true;
-
-    let chatDate: Date;
-    if (c.lastMessageAt && typeof (c.lastMessageAt as any).toDate === 'function') {
-      chatDate = (c.lastMessageAt as any).toDate();
-    } else if (c.lastMessageAt) {
-      chatDate = new Date(c.lastMessageAt as any);
-    } else {
-      chatDate = new Date();
-    }
-    
-    if (isNaN(chatDate.getTime())) chatDate = new Date();
-    const chatDateStr = getLocalDateString(chatDate);
-    return chatDateStr === selectedDate;
+    return dayOf(c) === selectedDate;
   });
 
-  // Grouping logic for the list
+  const todayStr = getLocalDateString(new Date());
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = getLocalDateString(yesterday);
+
   const getGroupLabel = (dateStr: string) => {
-    const today = getLocalDateString(new Date());
-    const yesterday = getLocalDateString(new Date(Date.now() - 86400000));
-    if (dateStr === today) return 'TODAY';
-    if (dateStr === yesterday) return 'YESTERDAY';
-    try {
-      const parts = dateStr.split('-');
-      const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
-    } catch (e) {
-      return 'UNKNOWN';
-    }
+    if (dateStr === 'unknown') return 'DATE UNKNOWN';
+    if (dateStr === todayStr) return 'TODAY';
+    if (dateStr === yesterdayStr) return 'YESTERDAY';
+    return fromLocalDateString(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
   };
 
   const groupedConversations = filtered.reduce((groups: { [key: string]: Conversation[] }, conversation) => {
-    let d: Date;
-    if (conversation.lastMessageAt && typeof (conversation.lastMessageAt as any).toDate === 'function') {
-      d = (conversation.lastMessageAt as any).toDate();
-    } else if (conversation.lastMessageAt) {
-      d = new Date(conversation.lastMessageAt as any);
-    } else {
-      d = new Date();
-    }
-
-    if (isNaN(d.getTime())) d = new Date();
-    const dateStr = getLocalDateString(d);
-    if (!groups[dateStr]) groups[dateStr] = [];
-    groups[dateStr].push(conversation);
+    const dateStr = dayOf(conversation);
+    (groups[dateStr] ||= []).push(conversation);
     return groups;
   }, {});
 
@@ -163,7 +127,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
               onClick={() => setRefreshKey(prev => prev + 1)}
               disabled={loading}
               className="p-5 text-neon-cyan/55 hover:text-neon-cyan border border-transparent disabled:opacity-21 transition-all"
-              title="Force Neural Sync"
+              title="Reload"
             >
               <motion.div animate={loading ? { rotate: 360 } : {}}>
                 <RefreshCw className="w-13 h-13" />
@@ -192,7 +156,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
                   ◀
                 </button>
                 <span className="text-[9px] min-w-55 text-center">
-                  {new Date(pickerYear, pickerMonth - 1).toLocaleString('en-US', { month: 'short', year: 'numeric' }).toUpperCase()}
+                  {new Date(pickerYear, pickerMonth - 1).toLocaleString(undefined, { month: 'short', year: 'numeric' }).toUpperCase()}
                 </span>
                 <button 
                   onClick={() => {
@@ -258,7 +222,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
             <div className="flex justify-between items-center pt-5 border-t border-white/5 text-[8px] text-parchment/34 font-mono">
               <span className="flex items-center gap-3">
                 <span className="w-[5px] h-[5px] bg-neon-cyan rounded-full" />
-                THREADS ON-CHAIN
+                DAYS WITH CONVERSATIONS
               </span>
               <button 
                 onClick={() => {
@@ -286,9 +250,8 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
             ALL TIME
           </button>
           {filterDays.map(day => {
-            const isToday = day === new Date().toISOString().split('T')[0];
-            const dateObj = new Date(day);
-            const label = isToday ? 'TODAY' : dateObj.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' }).toUpperCase();
+            const isToday = day === todayStr;
+            const label = isToday ? 'TODAY' : fromLocalDateString(day).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }).toUpperCase();
             
             return (
               <button
@@ -310,7 +273,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
           <Search className="absolute left-13 top-1/2 -translate-y-1/2 w-13 h-13 text-neon-cyan/55" />
           <input
             type="text"
-            placeholder="Search the witness chain..."
+            placeholder="Search your conversations..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full bg-void/55 border border-neon-cyan/21 rounded-8 py-8 pl-34 pr-13 text-13 text-parchment focus:border-neon-cyan focus:shadow-[0_0_10px_rgba(0,240,255,0.2)] outline-none transition-all"
@@ -320,13 +283,21 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-13 space-y-8">
         <div className="flex items-center justify-between px-8 py-5 mb-8 border-b border-neon-cyan/8">
-          <span className="text-[9px] caps-modern text-neon-cyan/55 font-bold uppercase tracking-widest">Secure Node Retrieval</span>
+          <span className="text-[9px] caps-modern text-neon-cyan/55 font-bold uppercase tracking-widest">Your conversations</span>
           <span className="text-[9px] font-mono text-neon-cyan bg-neon-cyan/13 px-5 py-1 rounded border border-neon-cyan/34 flex items-center gap-5">
             <div className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
             {filtered.length} THREADS
           </span>
         </div>
-        {loading ? (
+        {!user ? (
+          <div className="text-center py-55 opacity-55">
+            <p className="text-13 caps-modern tracking-widest text-neon-cyan">Sign in to see your conversations.</p>
+          </div>
+        ) : loadError ? (
+          <div className="text-center py-55">
+            <p className="text-13 caps-modern tracking-widest text-cyber-red">{loadError}</p>
+          </div>
+        ) : loading ? (
           <div className="flex flex-col items-center justify-center py-55 gap-13 opacity-34">
             <motion.div 
               animate={{ rotate: 360 }}
@@ -334,11 +305,11 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
             >
               <Clock className="w-34 h-34 text-neon-cyan drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]" />
             </motion.div>
-            <p className="text-13 caps-modern tracking-widest text-neon-cyan">Accessing Archive...</p>
+            <p className="text-13 caps-modern tracking-widest text-neon-cyan">Loading...</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="text-center py-55 opacity-55">
-            <p className="text-13 caps-modern tracking-widest text-neon-cyan">No witnesses found in this sector.</p>
+            <p className="text-13 caps-modern tracking-widest text-neon-cyan">No conversations found.</p>
           </div>
         ) : (
           <div className="space-y-21">
@@ -366,20 +337,15 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
                       <MessageSquare className="w-13 h-13" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-13 font-medium truncate mb-3">{chat.title}</p>
+                      <p className="text-13 font-medium truncate mb-3">{chat.title || 'Untitled conversation'}</p>
                       <div className="flex items-center gap-8 opacity-34 text-[10px]">
                         <Calendar className="w-8 h-8" />
                         <span>
                           {(() => {
-                            const lat = (chat.lastMessageAt as any);
-                            let d: Date;
-                            if (lat?.seconds) d = new Date(lat.seconds * 1000);
-                            else if (typeof lat?.toDate === 'function') d = lat.toDate();
-                            else d = new Date(lat || Date.now());
-                            return isNaN(d.getTime()) ? 'RECENT' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            const d = lastActivity(chat);
+                            return d ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '—';
                           })()}
                         </span>
-                        <span className="ml-auto">Auth: {chat.id.substring(0, 5)}</span>
                       </div>
                     </div>
                     <ChevronRight className="w-13 h-13 opacity-0 group-hover:opacity-100 transition-opacity self-center text-neon-cyan" />
@@ -393,7 +359,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
 
       <div className="p-13 border-t border-neon-cyan/13 bg-void/89 text-center">
         <p className="text-[10px] text-neon-cyan/55 caps-modern tracking-[0.21em] drop-shadow-[0_0_2px_rgba(0,240,255,0.3)]">
-          All history is witnessed by the Aitihya Chain
+          Private to your account · you can export or delete it
         </p>
       </div>
     </div>

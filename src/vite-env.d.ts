@@ -14,3 +14,14 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+interface ImportMetaEnv {
+  readonly VITE_RAZORPAY_KEY_ID?: string
+  readonly VITE_LEGAL_ENTITY?: string
+  readonly VITE_LEGAL_ADDRESS?: string
+  readonly VITE_CONTACT_EMAIL?: string
+  readonly VITE_GRIEVANCE_OFFICER?: string
+  readonly VITE_GRIEVANCE_EMAIL?: string
+  readonly VITE_PRICE_LABEL?: string
+  readonly VITE_GOVERNING_LAW?: string
+}
