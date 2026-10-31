@@ -54,6 +54,9 @@ async function request<T>(path: string, init: { method?: string; body?: unknown;
   return res.json() as Promise<T>;
 }
 
+/** Separates the streamed draft from the final, cited answer (see server/app.ts). */
+export const FINAL_MARKER = '\u001e';
+
 export type ChatTurn = { role: 'user' | 'model'; parts: { text: string }[] };
 
 /**
@@ -124,7 +127,7 @@ export interface Chronicle {
   status: 'ready' | 'generating' | 'failed';
   headline?: string;
   summary?: string;
-  stories?: { title: string; whatHappened: string; whoPays: string; region: string }[];
+  stories?: { title: string; whatHappened: string; effectOnPeople: string; region: string; verdict?: string; verificationNote?: string; sources?: Source[] }[];
   sources?: Source[];
   createdAt?: unknown;
 }

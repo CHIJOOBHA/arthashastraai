@@ -1,10 +1,15 @@
 /**
- * Gemini wrapper.
- *  - Optional Google Search grounding, with the real source links returned.
- *  - Model fallback on quota / overload errors.
- *  - NO invented fallback content: if the AI is unavailable we say so.
+ * The AI "brain" layer. Two interchangeable providers:
+ *   - Claude (Anthropic): web search with sentence-level citations, adaptive thinking.
+ *   - Gemini (Google):    Google Search grounding with groundingSupports, thinking level.
+ * Both return the same shape: the answer, the sources, and the answer split into
+ * spans that say which source supports which sentence. From that we add inline
+ * [n] citations and flag numbers that no source supports.
+ *
+ * No invented fallback content: if every provider fails, we say so honestly.
  */
 import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
 import { HttpError } from "./auth.js";
 
@@ -13,88 +18,442 @@ export interface Source {
   url: string;
 }
 
+/** A piece of the answer and the sources (indexes into `sources`) that support it. */
+export interface Span {
+  text: string;
+  cites: number[];
+}
+
 export interface AiResult {
+  /** Plain answer text (no citation markers). */
   text: string;
   sources: Source[];
   searchQueries: string[];
+  spans: Span[];
+  provider: "claude" | "gemini";
+  model: string;
 }
+
+export type Effort = "low" | "medium" | "high";
 
 export interface AiOptions {
   system: string;
-  /** Use Google Search so answers are based on live, citable sources. */
+  /** Search the live web so answers are based on current, citable sources. */
   grounded?: boolean;
-  /** Ask for JSON output (not combined with grounding; parse with extractJson). */
+  /** Ask for JSON output (parse with extractJson). */
   json?: boolean;
-  temperature?: number;
+  /** How hard the model should think. Default: high when grounded, medium otherwise. */
+  effort?: Effort;
+  /** "light" uses the cheaper model (background agents). */
+  tier?: "main" | "light";
+  /** Max web searches per request (Claude). */
+  maxSearches?: number;
 }
 
-const MODELS = (process.env.GEMINI_MODELS || "gemini-3.5-flash,gemini-flash-latest,gemini-flash-lite-latest")
-  .split(",")
-  .map((m) => m.trim())
-  .filter(Boolean);
+type Turn = { role: string; parts: Array<{ text: string }> };
+type Contents = string | Turn[];
 
-let client: GoogleGenAI | null = null;
-function getClient(): GoogleGenAI {
-  if (client) return client;
-  if (!config.geminiKey) {
-    throw new HttpError(503, "CONFIGURATION_REQUIRED", "The AI key is not configured on the server.");
-  }
-  if (!client) client = new GoogleGenAI({ apiKey: config.geminiKey });
-  return client;
+const list = (v: string | undefined, fallback: string) =>
+  (v || fallback)
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+
+const GEMINI_MAIN = list(process.env.GEMINI_MODELS, "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite");
+const GEMINI_LIGHT = list(process.env.GEMINI_LIGHT_MODELS, "gemini-3.5-flash-lite,gemini-3.6-flash");
+const CLAUDE_MAIN = list(process.env.CLAUDE_MODELS, "claude-opus-5-5,claude-sonnet-5-5");
+const CLAUDE_LIGHT = list(process.env.CLAUDE_LIGHT_MODELS, "claude-haiku-5-5,claude-sonnet-5-5");
+
+// ---------------------------------------------------------------------------
+// Clients
+// ---------------------------------------------------------------------------
+let gemini: GoogleGenAI | null = null;
+let claude: Anthropic | null = null;
+
+function geminiClient(): GoogleGenAI | null {
+  if (gemini) return gemini;
+  if (!config.geminiKey) return null;
+  gemini = new GoogleGenAI({ apiKey: config.geminiKey });
+  return gemini;
 }
 
-export const aiConfigured = () => !!config.geminiKey || !!client;
+function claudeClient(): Anthropic | null {
+  if (claude) return claude;
+  if (!config.anthropicKey) return null;
+  claude = new Anthropic({ apiKey: config.anthropicKey, maxRetries: 1, timeout: 120_000 });
+  return claude;
+}
 
-/** Test hook: inject a fake Gemini client. */
+/** Provider order: the preferred one first, the other as a fallback when it is configured. */
+function providers(): Array<"claude" | "gemini"> {
+  const out: Array<"claude" | "gemini"> = [];
+  const pref = config.aiProvider;
+  const order: Array<"claude" | "gemini"> = pref === "gemini" ? ["gemini", "claude"] : ["claude", "gemini"];
+  for (const p of order) if (p === "claude" ? claudeClient() : geminiClient()) out.push(p);
+  return out;
+}
+
+export const aiConfigured = () => providers().length > 0;
+export const aiProviderStatus = () => ({ providers: providers() });
+
+/** Test hooks: inject fake clients. */
 export function __setAiClientForTests(fake: unknown) {
-  client = fake as GoogleGenAI;
+  gemini = fake as GoogleGenAI;
+}
+export function __setClaudeClientForTests(fake: unknown) {
+  claude = fake as Anthropic;
 }
 
-/** Errors where trying the next model makes sense. */
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+const msgOf = (e: unknown) => String((e as any)?.message || e);
 function isRetryable(err: unknown): boolean {
-  const s = String((err as any)?.message || err);
-  return /429|RESOURCE_EXHAUSTED|quota|503|UNAVAILABLE|overloaded|demand|500|INTERNAL|not found|NOT_FOUND|404/i.test(s);
+  return /429|RESOURCE_EXHAUSTED|quota|rate|503|UNAVAILABLE|overloaded|529|demand|500|INTERNAL|not found|NOT_FOUND|404|EMPTY_RESPONSE|timeout/i.test(
+    msgOf(err),
+  );
 }
-
 function isQuota(err: unknown): boolean {
-  return /429|RESOURCE_EXHAUSTED|quota/i.test(String((err as any)?.message || err));
+  return /429|RESOURCE_EXHAUSTED|quota|rate limit|credit balance/i.test(msgOf(err));
+}
+function aiUnavailable(err: unknown): HttpError {
+  if (err instanceof HttpError) return err;
+  return isQuota(err)
+    ? new HttpError(429, "RESOURCE_EXHAUSTED", "The AI is busy right now (quota reached). Please try again later.")
+    : new HttpError(503, "AI_UNAVAILABLE", "The AI could not answer right now. Please try again in a minute.");
 }
 
-function buildConfig(opts: AiOptions) {
+// ---------------------------------------------------------------------------
+// Gemini
+// ---------------------------------------------------------------------------
+function geminiConfig(opts: AiOptions) {
+  // Gemini 3.x: keep default temperature/top_p (Google's guidance); control depth with thinkingLevel.
+  const effort = opts.effort || (opts.grounded ? "high" : "medium");
   const cfg: Record<string, unknown> = {
     systemInstruction: opts.system,
-    temperature: opts.temperature ?? (opts.grounded ? 0.3 : 0.5),
+    thinkingConfig: { thinkingLevel: effort.toUpperCase() },
   };
   if (opts.grounded) cfg.tools = [{ googleSearch: {} }];
   if (opts.json && !opts.grounded) cfg.responseMimeType = "application/json";
   return cfg;
 }
 
-type Contents = string | Array<{ role: string; parts: Array<{ text: string }> }>;
+const geminiContents = (c: Contents) => (typeof c === "string" ? [{ role: "user", parts: [{ text: c }] }] : c);
 
-function normaliseContents(contents: Contents) {
-  return typeof contents === "string" ? [{ role: "user", parts: [{ text: contents }] }] : contents;
+/** Builds sources + spans from Gemini grounding metadata. */
+function geminiGrounding(text: string, candidate: any): { sources: Source[]; queries: string[]; spans: Span[] } {
+  const gm = candidate?.groundingMetadata || {};
+  const sources: Source[] = [];
+  const chunkToSource = new Map<number, number>();
+  (gm.groundingChunks || []).forEach((ch: any, i: number) => {
+    const uri = ch?.web?.uri;
+    if (!uri) return;
+    let idx = sources.findIndex((s) => s.url === uri);
+    if (idx === -1) {
+      let title = ch.web.title;
+      if (!title) {
+        try {
+          title = new URL(uri).hostname;
+        } catch {
+          title = uri;
+        }
+      }
+      sources.push({ title, url: uri });
+      idx = sources.length - 1;
+    }
+    chunkToSource.set(i, idx);
+  });
+
+  // Locate each supported segment in the text (by its text, which is robust to byte/char offsets).
+  const marks: Array<{ start: number; end: number; cites: number[] }> = [];
+  let cursor = 0;
+  for (const sup of gm.groundingSupports || []) {
+    const segText: string = sup?.segment?.text || "";
+    if (!segText) continue;
+    let at = text.indexOf(segText, cursor);
+    if (at === -1) at = text.indexOf(segText);
+    if (at === -1) continue;
+    const cites = [...new Set((sup.groundingChunkIndices || []).map((c: number) => chunkToSource.get(c)).filter((x: unknown) => x !== undefined))] as number[];
+    if (!cites.length) continue;
+    marks.push({ start: at, end: at + segText.length, cites });
+    cursor = at + segText.length;
+  }
+  marks.sort((a, b) => a.start - b.start);
+  const spans: Span[] = [];
+  let pos = 0;
+  for (const m of marks) {
+    if (m.start < pos) continue; // overlapping support: skip
+    if (m.start > pos) spans.push({ text: text.slice(pos, m.start), cites: [] });
+    spans.push({ text: text.slice(m.start, m.end), cites: m.cites });
+    pos = m.end;
+  }
+  if (pos < text.length) spans.push({ text: text.slice(pos), cites: [] });
+  return { sources, queries: gm.webSearchQueries || [], spans };
 }
 
-/** Pulls the real web sources and search queries out of a Gemini response. */
-function collectGrounding(candidate: any, into: { sources: Map<string, Source>; queries: Set<string> }) {
-  const gm = candidate?.groundingMetadata;
-  if (!gm) return;
-  for (const chunk of gm.groundingChunks || []) {
-    const uri = chunk?.web?.uri;
-    if (uri && !into.sources.has(uri)) {
-      into.sources.set(uri, { title: chunk.web.title || new URL(uri).hostname, url: uri });
+async function geminiGenerate(contents: Contents, opts: AiOptions, models: string[]): Promise<AiResult> {
+  const ai = geminiClient()!;
+  let lastErr: unknown;
+  for (const model of models) {
+    try {
+      const res: any = await ai.models.generateContent({ model, contents: geminiContents(contents), config: geminiConfig(opts) });
+      const text = res.text ?? "";
+      if (!text.trim()) throw new Error("EMPTY_RESPONSE");
+      const g = geminiGrounding(text, res.candidates?.[0]);
+      return { text, sources: g.sources, searchQueries: g.queries, spans: g.spans, provider: "gemini", model };
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[ai] gemini ${model} failed: ${msgOf(e).slice(0, 200)}`);
+      if (!isRetryable(e)) break;
     }
   }
-  for (const q of gm.webSearchQueries || []) into.queries.add(q);
+  throw lastErr;
+}
+
+async function* geminiStream(
+  contents: Contents,
+  opts: AiOptions,
+  models: string[],
+  done: (r: AiResult) => void,
+): AsyncGenerator<string> {
+  const ai = geminiClient()!;
+  let lastErr: unknown;
+  for (const model of models) {
+    let started = false;
+    try {
+      const stream: any = await ai.models.generateContentStream({ model, contents: geminiContents(contents), config: geminiConfig(opts) });
+      let text = "";
+      let lastCandidate: any = null;
+      const merged: any = { groundingMetadata: { groundingChunks: [], groundingSupports: [], webSearchQueries: [] } };
+      for await (const chunk of stream) {
+        const cand = chunk.candidates?.[0];
+        if (cand?.groundingMetadata) {
+          lastCandidate = cand;
+          const gm = cand.groundingMetadata;
+          // Streams usually send full grounding metadata on the last chunk; keep the richest one.
+          if ((gm.groundingChunks || []).length >= merged.groundingMetadata.groundingChunks.length) merged.groundingMetadata = gm;
+        }
+        const t = chunk.text;
+        if (t) {
+          started = true;
+          text += t;
+          yield t;
+        }
+      }
+      if (!started) throw new Error("EMPTY_RESPONSE");
+      const g = geminiGrounding(text, lastCandidate ? merged : null);
+      done({ text, sources: g.sources, searchQueries: g.queries, spans: g.spans, provider: "gemini", model });
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[ai] gemini stream ${model} failed: ${msgOf(e).slice(0, 200)}`);
+      if (started) throw aiUnavailable(e);
+      if (!isRetryable(e)) break;
+    }
+  }
+  throw lastErr;
+}
+
+// ---------------------------------------------------------------------------
+// Claude
+// ---------------------------------------------------------------------------
+const claudeMessages = (c: Contents) =>
+  (typeof c === "string" ? [{ role: "user", parts: [{ text: c }] }] : c).map((t) => ({
+    role: t.role === "model" ? ("assistant" as const) : ("user" as const),
+    content: t.parts.map((p) => p.text).join("\n"),
+  }));
+
+function claudeParams(opts: AiOptions, model: string, messages: any[]) {
+  const effort = opts.effort || (opts.grounded ? "high" : "medium");
+  const params: Record<string, unknown> = {
+    model,
+    max_tokens: 16000,
+    system: opts.json ? `${opts.system}\n\nReturn ONLY valid JSON, with no text before or after it.` : opts.system,
+    messages,
+    thinking: { type: "adaptive" },
+    output_config: { effort },
+  };
+  if (opts.grounded) {
+    params.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: opts.maxSearches ?? 6 }];
+  }
+  return params;
+}
+
+/** Builds text, sources and spans from Claude content blocks (text blocks carry their citations). */
+function claudeCollect(blocks: any[]): { text: string; sources: Source[]; queries: string[]; spans: Span[] } {
+  const sources: Source[] = [];
+  const spans: Span[] = [];
+  const queries: string[] = [];
+  for (const b of blocks) {
+    if (b.type === "server_tool_use" && b.name === "web_search" && b.input?.query) queries.push(String(b.input.query));
+    if (b.type !== "text") continue;
+    const cites: number[] = [];
+    for (const c of b.citations || []) {
+      if (c.type !== "web_search_result_location" || !c.url) continue;
+      let idx = sources.findIndex((s) => s.url === c.url);
+      if (idx === -1) {
+        sources.push({ title: c.title || c.url, url: c.url });
+        idx = sources.length - 1;
+      }
+      if (!cites.includes(idx)) cites.push(idx);
+    }
+    spans.push({ text: b.text, cites });
+  }
+  return { text: spans.map((s) => s.text).join(""), sources, queries, spans };
+}
+
+/** Runs one Claude request, continuing automatically when a long web search pauses the turn. */
+async function claudeRun(opts: AiOptions, model: string, contents: Contents, onText?: (t: string) => void): Promise<any[]> {
+  const client = claudeClient()!;
+  const messages: any[] = claudeMessages(contents);
+  const blocks: any[] = [];
+  for (let turn = 0; turn < 4; turn++) {
+    const params = claudeParams(opts, model, messages) as any;
+    let final: any;
+    if (onText) {
+      const stream = (client.messages as any).stream(params);
+      stream.on("text", (t: string) => onText(t));
+      final = await stream.finalMessage();
+    } else {
+      final = await client.messages.create(params);
+    }
+    blocks.push(...(final.content || []));
+    if (final.stop_reason !== "pause_turn") break;
+    messages.push({ role: "assistant", content: final.content });
+  }
+  return blocks;
+}
+
+async function claudeGenerate(contents: Contents, opts: AiOptions, models: string[]): Promise<AiResult> {
+  let lastErr: unknown;
+  for (const model of models) {
+    try {
+      const blocks = await claudeRun(opts, model, contents);
+      const c = claudeCollect(blocks);
+      if (!c.text.trim()) throw new Error("EMPTY_RESPONSE");
+      return { text: c.text, sources: c.sources, searchQueries: c.queries, spans: c.spans, provider: "claude", model };
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[ai] claude ${model} failed: ${msgOf(e).slice(0, 200)}`);
+      if (!isRetryable(e)) break;
+    }
+  }
+  throw lastErr;
+}
+
+async function* claudeStream(
+  contents: Contents,
+  opts: AiOptions,
+  models: string[],
+  done: (r: AiResult) => void,
+): AsyncGenerator<string> {
+  let lastErr: unknown;
+  for (const model of models) {
+    let started = false;
+    // Bridge the SDK's callback stream into an async generator.
+    const queue: string[] = [];
+    let wake: (() => void) | null = null;
+    let finished = false;
+    let failure: unknown = null;
+    let blocks: any[] = [];
+    claudeRun(opts, model, contents, (t) => {
+      queue.push(t);
+      wake?.();
+    })
+      .then((b) => (blocks = b))
+      .catch((e) => (failure = e))
+      .finally(() => {
+        finished = true;
+        wake?.();
+      });
+    try {
+      while (true) {
+        if (queue.length) {
+          started = true;
+          yield queue.shift()!;
+          continue;
+        }
+        if (finished) break;
+        await new Promise<void>((r) => (wake = r));
+        wake = null;
+      }
+      if (failure) throw failure;
+      const c = claudeCollect(blocks);
+      if (!c.text.trim()) throw new Error("EMPTY_RESPONSE");
+      done({ text: c.text, sources: c.sources, searchQueries: c.queries, spans: c.spans, provider: "claude", model });
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[ai] claude stream ${model} failed: ${msgOf(e).slice(0, 200)}`);
+      if (started) throw aiUnavailable(e);
+      if (!isRetryable(e)) break;
+    }
+  }
+  throw lastErr;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+const modelsFor = (p: "claude" | "gemini", tier: AiOptions["tier"]) =>
+  p === "claude" ? (tier === "light" ? CLAUDE_LIGHT : CLAUDE_MAIN) : tier === "light" ? GEMINI_LIGHT : GEMINI_MAIN;
+
+/** One-shot generation, with model and provider fallback. */
+export async function generate(contents: Contents, opts: AiOptions): Promise<AiResult> {
+  const ps = providers();
+  if (!ps.length) throw new HttpError(503, "CONFIGURATION_REQUIRED", "The AI key is not configured on the server.");
+  let lastErr: unknown;
+  for (const p of ps) {
+    try {
+      return p === "claude"
+        ? await claudeGenerate(contents, opts, modelsFor(p, opts.tier))
+        : await geminiGenerate(contents, opts, modelsFor(p, opts.tier));
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw aiUnavailable(lastErr);
 }
 
 /**
- * Grounding links are Google redirect URLs. Resolve them to the real article
- * URL (best effort, short timeout) so stored citations stay readable.
+ * Streaming generation. Yields text as it is written; `onDone` receives the full
+ * result (with sources and citation spans) at the end. Provider fallback is only
+ * possible before the first chunk reaches the user.
+ */
+export async function* generateStream(
+  contents: Contents,
+  opts: AiOptions,
+  onDone?: (r: AiResult) => void,
+): AsyncGenerator<string> {
+  const ps = providers();
+  if (!ps.length) throw new HttpError(503, "CONFIGURATION_REQUIRED", "The AI key is not configured on the server.");
+  let lastErr: unknown;
+  for (const p of ps) {
+    let started = false;
+    try {
+      const it =
+        p === "claude"
+          ? claudeStream(contents, opts, modelsFor(p, opts.tier), (r) => onDone?.(r))
+          : geminiStream(contents, opts, modelsFor(p, opts.tier), (r) => onDone?.(r));
+      for await (const chunk of it) {
+        started = true;
+        yield chunk;
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (started) throw aiUnavailable(e);
+    }
+  }
+  throw aiUnavailable(lastErr);
+}
+
+/**
+ * Grounding links from Gemini are Google redirect URLs. Resolve them to the real
+ * article URL (best effort, short timeout) so citations stay readable.
  */
 export async function resolveSources(sources: Source[], timeoutMs = 2500): Promise<Source[]> {
-  const out = await Promise.all(
+  return Promise.all(
     sources.map(async (s) => {
       if (!/grounding-api-redirect|vertexaisearch/.test(s.url)) return s;
       try {
@@ -109,82 +468,6 @@ export async function resolveSources(sources: Source[], timeoutMs = 2500): Promi
       }
     }),
   );
-  // De-duplicate after resolution.
-  const seen = new Set<string>();
-  return out.filter((s) => (seen.has(s.url) ? false : (seen.add(s.url), true)));
-}
-
-/** One-shot generation with model fallback. */
-export async function generate(contents: Contents, opts: AiOptions): Promise<AiResult> {
-  const ai = getClient();
-  let lastErr: unknown;
-  for (const model of MODELS) {
-    try {
-      const res: any = await ai.models.generateContent({
-        model,
-        contents: normaliseContents(contents),
-        config: buildConfig(opts),
-      });
-      const acc = { sources: new Map<string, Source>(), queries: new Set<string>() };
-      collectGrounding(res.candidates?.[0], acc);
-      const text = res.text ?? "";
-      if (!text.trim()) throw new Error("EMPTY_RESPONSE");
-      return { text, sources: [...acc.sources.values()], searchQueries: [...acc.queries] };
-    } catch (e) {
-      lastErr = e;
-      console.warn(`[ai] ${model} failed: ${String((e as any)?.message || e).slice(0, 200)}`);
-      if (!isRetryable(e) && String((e as any)?.message) !== "EMPTY_RESPONSE") break;
-    }
-  }
-  throw aiUnavailable(lastErr);
-}
-
-/**
- * Streaming generation with model fallback. Fallback is only possible before
- * the first chunk has been sent to the user.
- */
-export async function* generateStream(
-  contents: Contents,
-  opts: AiOptions,
-  onDone?: (r: { sources: Source[]; searchQueries: string[] }) => void,
-): AsyncGenerator<string> {
-  const ai = getClient();
-  let lastErr: unknown;
-  for (const model of MODELS) {
-    let started = false;
-    try {
-      const stream: any = await ai.models.generateContentStream({
-        model,
-        contents: normaliseContents(contents),
-        config: buildConfig(opts),
-      });
-      const acc = { sources: new Map<string, Source>(), queries: new Set<string>() };
-      for await (const chunk of stream) {
-        collectGrounding(chunk.candidates?.[0], acc);
-        const t = chunk.text;
-        if (t) {
-          started = true;
-          yield t;
-        }
-      }
-      if (!started) throw new Error("EMPTY_RESPONSE");
-      onDone?.({ sources: [...acc.sources.values()], searchQueries: [...acc.queries] });
-      return;
-    } catch (e) {
-      lastErr = e;
-      console.warn(`[ai] stream ${model} failed: ${String((e as any)?.message || e).slice(0, 200)}`);
-      if (started) throw aiUnavailable(e); // cannot switch model mid-answer
-      if (!isRetryable(e) && String((e as any)?.message) !== "EMPTY_RESPONSE") break;
-    }
-  }
-  throw aiUnavailable(lastErr);
-}
-
-function aiUnavailable(err: unknown): HttpError {
-  if (err instanceof HttpError) return err;
-  return isQuota(err)
-    ? new HttpError(429, "RESOURCE_EXHAUSTED", "The AI is busy right now (quota reached). Please try again later.")
-    : new HttpError(503, "AI_UNAVAILABLE", "The AI could not answer right now. Please try again in a minute.");
 }
 
 /** Extracts the first JSON array/object from model text. Returns null if none. */
@@ -209,20 +492,70 @@ export function extractJson<T = unknown>(text: string): T | null {
   return null;
 }
 
-/** Markdown block listing the sources, appended to answers shown to users. */
-export function sourcesMarkdown(sources: Source[], queries: string[] = []): string {
-  if (!sources.length) {
-    return "\n\n---\n_No live web sources were used for this answer. Treat any figures as unverified._";
+// ---------------------------------------------------------------------------
+// Citations and "unsupported claim" checks
+// ---------------------------------------------------------------------------
+const COUNTER_TWEET = /\*\*Counter-Tweet:\*\*/i;
+
+/**
+ * Sentences that state a number (amount, %, year, count) but have no supporting
+ * source. These are the riskiest kind of claim, so we show them to the reader.
+ */
+export function unsupportedClaims(spans: Span[]): string[] {
+  const out: string[] = [];
+  for (const s of spans) {
+    if (s.cites.length) continue;
+    for (const raw of s.text.split(/(?<=[.!?।])\s+|\n+/)) {
+      // Strip Markdown list/heading/quote markers only (keep numbers that start a sentence).
+      const sentence = raw.replace(/^\s*(?:[#>*\-]+|\d+[.)])\s+/, "").replace(/\*\*/g, "").trim();
+      if (sentence.length < 15 || COUNTER_TWEET.test(raw)) continue;
+      if (/\?\s*$/.test(sentence)) continue; // questions are not claims
+      if (!/\d/.test(sentence)) continue;
+      if (/^(assuming|step|\d+\.\s)/i.test(sentence)) continue;
+      out.push(sentence.length > 220 ? `${sentence.slice(0, 217)}...` : sentence);
+    }
   }
-  const list = sources
-    .slice(0, 10)
+  return [...new Set(out)].slice(0, 6);
+}
+
+/** The answer with inline [n] citation links after each supported span. */
+export function citedText(spans: Span[], sources: Source[]): string {
+  return spans
+    .map((s) => {
+      if (!s.cites.length) return s.text;
+      const marks = s.cites
+        .slice(0, 3)
+        .map((i) => `[[${i + 1}]](${sources[i]?.url ?? "#"})`)
+        .join("");
+      // Put markers before trailing whitespace/newlines so they stay on the same line.
+      const m = s.text.match(/^([\s\S]*?)(\s*)$/)!;
+      return `${m[1]} ${marks}${m[2]}`;
+    })
+    .join("");
+}
+
+/** Markdown footer: numbered sources, search queries, and any unsupported figures. */
+export function sourcesMarkdown(sources: Source[], queries: string[] = [], unsupported: string[] = []): string {
+  if (!sources.length) {
+    return "\n\n---\n_No live web sources were found for this answer. Treat every figure in it as unverified._";
+  }
+  const listMd = sources
+    .slice(0, 12)
     .map((s, i) => `${i + 1}. [${s.title.replace(/[\[\]]/g, "")}](${s.url})`)
     .join("\n");
   const q = queries.length
-    ? `\n\n_Searched on Google: ${queries
+    ? `\n\n_Searched: ${queries
         .slice(0, 4)
         .map((x) => `[${x.replace(/[\[\]]/g, "")}](https://www.google.com/search?q=${encodeURIComponent(x)})`)
         .join(" · ")}_`
     : "";
-  return `\n\n---\n**Sources**\n${list}${q}`;
+  const warn = unsupported.length
+    ? `\n\n**Not matched to a source — check before relying on these:**\n${unsupported.map((u) => `- ${u}`).join("\n")}`
+    : "";
+  return `\n\n---\n**Sources**\n${listMd}${q}${warn}`;
+}
+
+/** The full, final answer as shown to users: inline citations + sources footer. */
+export function finalAnswer(r: Pick<AiResult, "spans" | "sources" | "searchQueries">): string {
+  return citedText(r.spans, r.sources).trim() + sourcesMarkdown(r.sources, r.searchQueries, unsupportedClaims(r.spans));
 }

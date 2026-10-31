@@ -301,11 +301,29 @@ export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
                           <p className="text-13 text-parchment/89 leading-relaxed">{story.whatHappened}</p>
                         </div>
                       )}
-                      {story.whoPays && (
+                      {story.effectOnPeople && (
                         <div className={`p-13 border-l-4 rounded-r-8 ${magenta ? 'bg-neon-magenta/13 border-neon-magenta' : 'bg-neon-cyan/13 border-neon-cyan'}`}>
-                          <span className={`text-[9px] caps-modern block mb-5 font-bold ${magenta ? 'text-neon-magenta' : 'text-neon-cyan'}`}>WHO PAYS</span>
-                          <p className="text-13 text-parchment leading-relaxed">{story.whoPays}</p>
+                          <span className={`text-[9px] caps-modern block mb-5 font-bold ${magenta ? 'text-neon-magenta' : 'text-neon-cyan'}`}>EFFECT ON PEOPLE</span>
+                          <p className="text-13 text-parchment leading-relaxed">{story.effectOnPeople}</p>
                         </div>
+                      )}
+                      {story.verdict && (
+                        <p className="text-[11px] text-emerald-400/89 leading-relaxed">
+                          <span className="font-bold">{story.verdict === 'corrected' ? 'Corrected & fact-checked' : 'Fact-checked'}</span>
+                          {story.sources.length > 0 && ` by ${story.sources.length} sources`}
+                          {story.verificationNote ? ` — ${story.verificationNote}` : ''}
+                        </p>
+                      )}
+                      {story.sources.length > 0 && (
+                        <ul className="space-y-2 text-[11px]" aria-label="Sources for this story">
+                          {story.sources.map((src, i) => (
+                            <li key={src.url}>
+                              <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" className="text-neon-cyan/89 hover:underline break-all">
+                                [{i + 1}] {src.title}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
                       )}
                     </motion.article>
                   );

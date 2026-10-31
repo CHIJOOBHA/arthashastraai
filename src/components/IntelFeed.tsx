@@ -40,9 +40,18 @@ export function formatWhen(value: unknown, withDate = true): string {
     : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
+/** Whether a story is bad news, good news or mixed for ordinary people (set by the explainer agent). */
+const DIRECTION: Record<string, { label: string; className: string }> = {
+  harm: { label: 'Harm', className: 'text-red-400' },
+  protection: { label: 'Protection', className: 'text-emerald-400' },
+  reassurance: { label: 'Reassuring', className: 'text-emerald-400' },
+  mixed: { label: 'Mixed', className: 'text-amber-400' },
+};
+
 /** One published story: headline, impact, verification text and its source links. */
 export function IntelCard({ item, t, onOpenExplanation }: { item: IntelItem; t: Translation; onOpenExplanation?: (id: string) => void }) {
   const severity = typeof item.metadata?.severity === 'string' ? item.metadata.severity : undefined;
+  const direction = typeof item.metadata?.direction === 'string' ? DIRECTION[item.metadata.direction] : undefined;
   const sources = (Array.isArray(item.sources) ? item.sources : []).filter((s) => safeUrl(s?.url));
   const headline = item.headline || '';
   // `content` is "headline — impact"; show only the impact part under the headline.
@@ -54,6 +63,9 @@ export function IntelCard({ item, t, onOpenExplanation }: { item: IntelItem; t: 
         <div className="flex flex-wrap items-center gap-8 min-w-0">
           {item.metadata?.category && (
             <span className="text-[10px] uppercase tracking-widest text-neon-cyan/55 font-bold">{String(item.metadata.category)}</span>
+          )}
+          {direction && (
+            <span className={`text-[10px] uppercase tracking-widest font-bold ${direction.className}`}>{direction.label}</span>
           )}
           {item.country && (
             <span className="inline-flex items-center gap-3 text-[10px] text-parchment/55">

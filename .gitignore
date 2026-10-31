@@ -11,3 +11,4 @@ dev-dist/
 .firebase/
 *-debug.log
 firebase-applet-config.json
+eval-results/

@@ -20,13 +20,13 @@ Arthashastra AI shows people, in plain language and in their own language, how t
 ## How it is built
 
 ```
-Browser (React PWA)  ──ID token──▶  /api/*  (Express on Vercel)  ──▶  Gemini (with Google Search)
+Browser (React PWA)  ──ID token──▶  /api/*  (Express on Vercel)  ──▶  Claude Opus 5.5 + web search (or Gemini + Google Search)
         │                                   │
         └── reads public + own data ──▶ Firestore ◀── writes everything public / paid (Admin SDK)
 ```
 
 - `src/` — the React app. Contains **no** prompts, keys or AI calls; it talks to the server through `src/lib/api.ts`.
-- `server/` — the API: `app.ts` (routes), `ai.ts` (Gemini + sources), `agents.ts` (intelligence pipeline), `payments.ts` (Razorpay), `auth.ts` (sign-in, admin, daily limits), `ledger.ts`, `prompts.ts`.
+- `server/` — the API: `app.ts` (routes), `ai.ts` (Claude/Gemini brain + inline citations), `agents.ts` (intelligence pipeline), `payments.ts` (Razorpay), `auth.ts` (sign-in, admin, daily limits), `ledger.ts`, `prompts.ts`.
 - `firestore.rules` — database security. Browsers can only write their own private data and validated debate posts.
 - `api/index.ts` — Vercel entry. `server.ts` — local / Cloud Run entry.
 - `tests/` — unit tests, end-to-end tests (Firebase emulators) and security-rules tests. GitHub Actions runs all of them on every push.
@@ -38,7 +38,10 @@ Browser (React PWA)  ──ID token──▶  /api/*  (Express on Vercel)  ─�
    - Project settings → Service accounts → *Generate new private key* → paste the JSON into `FIREBASE_SERVICE_ACCOUNT`.
    - **Publish the rules:** Firestore → Rules → paste the contents of `firestore.rules` → Publish.
    - Authentication → Settings → Authorized domains → add your Vercel domain.
-2. **Gemini key** from aistudio.google.com/apikey → `GEMINI_API_KEY`.
+2. **AI key** — at least one:
+   - **Claude (recommended):** on claude.ai, Settings → Billing → API credits → Link organization (Max plans include monthly API credits), then platform.claude.com → API keys → `ANTHROPIC_API_KEY`.
+   - **Gemini (backup):** aistudio.google.com/apikey with billing on (Google Search grounding is not in the free tier) → `GEMINI_API_KEY`.
+   - With both set, Claude answers first and Gemini takes over automatically if Claude fails or credits run out (`AI_PROVIDER` picks the order).
 3. **Razorpay** keys → `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`. Add a webhook to `https://<your-domain>/api/payments/webhook` for `payment.captured` and `order.paid`, and put its secret in `RAZORPAY_WEBHOOK_SECRET`.
 4. Long random strings for `AITIHYA_SIGNING_SECRET` and `CRON_SECRET`. Your Google email in `ADMIN_EMAILS`.
 5. Fill the `VITE_LEGAL_*`, `VITE_CONTACT_EMAIL` and `VITE_GRIEVANCE_*` values (shown on the Terms / Privacy pages; required for Razorpay and Indian IT Rules).
@@ -59,5 +62,9 @@ npm run lint           # type check
 ## Limits and honesty notes
 
 - The AI can still make mistakes. Answers always show their sources so readers can check.
-- Daily AI limits per user (anonymous 5, signed-in 20, subscribers 200) protect your Gemini bill; change them with the `DAILY_LIMIT_*` variables.
+- Daily AI limits per user (anonymous 5, signed-in 20, subscribers 200) protect your AI bill; change them with the `DAILY_LIMIT_*` variables.
 - Vercel Hobby runs cron once a day, so ~3–4 desks refresh per day (all 12 every few days). Vercel Pro or an always-on server can run more often.
+
+## The brain exam
+
+`npm run eval` (with `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` set) asks the real AI 15 probing questions — a checkable fact, a false premise, a loaded question, an ambiguous question, an unverifiable accusation, a BJP/Congress symmetry pair, inflation maths, a causal claim, a denominator trap, a "no cheating" case, a Telugu scam victim, official-data distrust, a Nigerian bank case and a crypto "guaranteed returns" pitch — and grades each answer on 8 reasoning skills plus automatic checks (sources, inline citations, unsupported figures, Counter-Tweet, language). The report is written to `eval-results/`. On GitHub: Actions → **Brain exam** → Run workflow (needs the key as a repository secret).
