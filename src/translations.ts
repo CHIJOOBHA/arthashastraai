@@ -134,6 +134,7 @@ const en = {
   planNote:
     'Payments are processed by Razorpay in Indian rupees. This is a one-time payment for the period shown; it does not renew automatically.',
   planAnonNote: 'Sign in with Google to subscribe.',
+  paymentsComingSoon: 'Subscriptions open soon. Until then, every feature is free.',
   paywallNotice: 'You have used your free explanations. Subscribe to keep reading.',
   paymentProcessing: 'Opening payment…',
   paymentSuccessTitle: 'Payment received',

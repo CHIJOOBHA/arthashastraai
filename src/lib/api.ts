@@ -95,6 +95,8 @@ export interface Me {
   explanationViewCount: number;
   freeExplanations: number;
   usedToday: number;
+  /** False while Razorpay is not configured: subscriptions are hidden and explanations are free. */
+  paymentsEnabled: boolean;
 }
 export const getMe = () => request<Me>('/api/me');
 

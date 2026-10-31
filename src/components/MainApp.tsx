@@ -667,7 +667,7 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
     t, user, language: langName, intelligence, logs, health,
     onRunAgents: handleRunAgents, isRunningAgents, onOpenExplanation: openExplanation,
   };
-  const childProps = { user, language: langName, isAdmin, isSubscribed, onSubscribe: startCheckout };
+  const childProps = { user, language: langName, isAdmin, isSubscribed, paymentsEnabled: me?.paymentsEnabled !== false, onSubscribe: startCheckout };
 
   const historySidebar = (
     <aside

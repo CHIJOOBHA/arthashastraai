@@ -8,6 +8,8 @@ interface TheWarChestProps {
   language?: string;
   isAdmin?: boolean;
   isSubscribed?: boolean;
+  /** False while subscriptions are not open yet. */
+  paymentsEnabled?: boolean;
   /** Preferred: starts the Razorpay checkout. */
   onSubscribe?: () => void;
   /** Older name for onSubscribe, still accepted. */
@@ -17,7 +19,7 @@ interface TheWarChestProps {
   subscriptionExpiresAt?: string | null;
 }
 
-export function TheWarChest({ user, isSubscribed, onSubscribe, handlePayment, isLoading, subscriptionExpiresAt }: TheWarChestProps) {
+export function TheWarChest({ user, isSubscribed, paymentsEnabled = true, onSubscribe, handlePayment, isLoading, subscriptionExpiresAt }: TheWarChestProps) {
   const subscribe = onSubscribe || handlePayment;
   const expires = subscriptionExpiresAt ? new Date(subscriptionExpiresAt) : null;
   const expiresLabel = expires && !isNaN(expires.getTime()) ? expires.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : null;
@@ -81,6 +83,10 @@ export function TheWarChest({ user, isSubscribed, onSubscribe, handlePayment, is
               <div className="px-21 py-13 border border-emerald-500/55 bg-emerald-500/13 text-emerald-400 text-13 rounded-8 flex items-center justify-center gap-8">
                 <CheckCircle2 className="w-13 h-13" />
                 <span>Your plan is active{expiresLabel ? ` until ${expiresLabel}` : ''}. Thank you!</span>
+              </div>
+            ) : !paymentsEnabled ? (
+              <div className="px-21 py-13 border border-emerald-500/55 bg-emerald-500/13 text-emerald-400 text-13 rounded-8">
+                Subscriptions open soon. Until then, every feature is free.
               </div>
             ) : !user || user.isAnonymous ? (
               <div className="px-21 py-13 border border-amber-500/34 bg-amber-500/13 text-amber-500/89 text-[11px] caps-modern">

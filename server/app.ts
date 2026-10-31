@@ -102,6 +102,7 @@ export function createApp() {
         subscriptionExpiresAt: snap?.get("subscriptionExpiresAt") || null,
         explanationViewCount: snap?.get("explanationViewCount") || 0,
         freeExplanations: config.limits.freeExplanations,
+        paymentsEnabled: paymentsConfigured(),
         usedToday: usage?.get("count") || 0,
       });
     }),
@@ -317,7 +318,8 @@ export function createApp() {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new HttpError(400, "BAD_REQUEST", "Invalid id.");
     const db = requireDb();
     const uid = req.user!.uid;
-    const subscribed = await isSubscribed(uid);
+    // While payments are not set up, nobody can subscribe, so explanations are free for everyone.
+    const subscribed = !paymentsConfigured() || (await isSubscribed(uid));
     const userRef = db.collection("users").doc(uid);
     const expRef = db.collection("explanations").doc(id);
     const seenRef = userRef.collection("seen_explanations").doc(id);

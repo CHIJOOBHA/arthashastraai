@@ -61,7 +61,9 @@ export function PlanView({ t, me, isAnonymous, notice, onSubscribe, isPaying }: 
             <li className="flex items-center gap-8"><CheckCircle2 className="w-13 h-13 text-neon-magenta" aria-hidden /> {t.planPaidSame}</li>
           </ul>
           {subscribed && expires && <p className="text-13 font-bold text-neon-magenta">{fmt(t.planActiveUntil, { date: expires })}</p>}
-          {isAnonymous ? (
+          {me && me.paymentsEnabled === false ? (
+            <p className="text-13 text-emerald-400">{t.paymentsComingSoon}</p>
+          ) : isAnonymous ? (
             <p className="text-13 text-amber-400">{t.planAnonNote}</p>
           ) : (
             <button
