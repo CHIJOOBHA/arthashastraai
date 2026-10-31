@@ -32,6 +32,8 @@ export interface AiResult {
   spans: Span[];
   provider: "claude" | "gemini";
   model: string;
+  /** Full pages/PDFs the model opened and read (Claude web fetch). */
+  fetched?: string[];
 }
 
 export type Effort = "low" | "medium" | "high";
@@ -48,6 +50,8 @@ export interface AiOptions {
   tier?: "main" | "light";
   /** Max web searches per request (Claude). */
   maxSearches?: number;
+  /** Max full pages/PDFs the model may open and read per request (Claude, main tier). */
+  maxFetches?: number;
 }
 
 type Turn = { role: string; parts: Array<{ text: string }> };
@@ -263,6 +267,9 @@ const claudeMessages = (c: Contents) =>
     content: t.parts.map((p) => p.text).join("\n"),
   }));
 
+/** Set when the API refuses the page-reading tool (e.g. restricted environments); we then search only. */
+let webFetchDisabled = process.env.DISABLE_WEB_FETCH === "1";
+
 function claudeParams(opts: AiOptions, model: string, messages: any[]) {
   const effort = opts.effort || (opts.grounded ? "high" : "medium");
   const params: Record<string, unknown> = {
@@ -274,32 +281,68 @@ function claudeParams(opts: AiOptions, model: string, messages: any[]) {
     output_config: { effort },
   };
   if (opts.grounded) {
-    params.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: opts.maxSearches ?? 8 }];
+    const tools: any[] = [{ type: "web_search_20250305", name: "web_search", max_uses: opts.maxSearches ?? 8 }];
+    // Main tier can open and read full pages/PDFs (official circulars, statistics releases),
+    // only from URLs found by its own searches or given by the user. Size-capped to control cost.
+    if (opts.tier !== "light" && !webFetchDisabled) {
+      tools.push({
+        type: "web_fetch_20250910",
+        name: "web_fetch",
+        max_uses: opts.maxFetches ?? 3,
+        max_content_tokens: 20000,
+        citations: { enabled: true },
+      });
+    }
+    params.tools = tools;
   }
   return params;
 }
 
-/** Builds text, sources and spans from Claude content blocks (text blocks carry their citations). */
-function claudeCollect(blocks: any[]): { text: string; sources: Source[]; queries: string[]; spans: Span[] } {
+/**
+ * Builds text, sources and spans from Claude content blocks. Text blocks carry
+ * citations: "web_search_result_location" (search results, with a URL) or
+ * "char_location"/"page_location" (a fetched document, identified by
+ * document_index/document_title, which we map back to the fetched URL).
+ */
+function claudeCollect(blocks: any[]): { text: string; sources: Source[]; queries: string[]; spans: Span[]; fetched: string[] } {
   const sources: Source[] = [];
   const spans: Span[] = [];
   const queries: string[] = [];
+  const docs: Array<{ url: string; title: string }> = [];
+  for (const b of blocks) {
+    if (b.type === "web_fetch_tool_result" && b.content?.type === "web_fetch_result" && b.content.url) {
+      docs.push({ url: b.content.url, title: String(b.content.content?.title || "") });
+    }
+  }
+  const sourceIndex = (url: string, title: string) => {
+    let idx = sources.findIndex((s) => s.url === url);
+    if (idx === -1) {
+      sources.push({ title: title || url, url });
+      idx = sources.length - 1;
+    }
+    return idx;
+  };
+  const docFor = (c: any) => {
+    const byTitle = c.document_title ? docs.filter((d) => d.title && d.title === c.document_title) : [];
+    if (byTitle.length === 1) return byTitle[0];
+    return typeof c.document_index === "number" ? docs[c.document_index] : undefined;
+  };
   for (const b of blocks) {
     if (b.type === "server_tool_use" && b.name === "web_search" && b.input?.query) queries.push(String(b.input.query));
     if (b.type !== "text") continue;
     const cites: number[] = [];
     for (const c of b.citations || []) {
-      if (c.type !== "web_search_result_location" || !c.url) continue;
-      let idx = sources.findIndex((s) => s.url === c.url);
-      if (idx === -1) {
-        sources.push({ title: c.title || c.url, url: c.url });
-        idx = sources.length - 1;
+      let idx = -1;
+      if (c.type === "web_search_result_location" && c.url) idx = sourceIndex(c.url, c.title || "");
+      else if (c.type === "char_location" || c.type === "page_location" || c.type === "content_block_location") {
+        const d = docFor(c);
+        if (d) idx = sourceIndex(d.url, d.title || c.document_title || "");
       }
-      if (!cites.includes(idx)) cites.push(idx);
+      if (idx !== -1 && !cites.includes(idx)) cites.push(idx);
     }
     spans.push({ text: b.text, cites });
   }
-  return { text: spans.map((s) => s.text).join(""), sources, queries, spans };
+  return { text: spans.map((s) => s.text).join(""), sources, queries, spans, fetched: docs.map((d) => d.url) };
 }
 
 /** Runs one Claude request, continuing automatically when a long web search pauses the turn. */
@@ -310,12 +353,25 @@ async function claudeRun(opts: AiOptions, model: string, contents: Contents, onT
   for (let turn = 0; turn < 4; turn++) {
     const params = claudeParams(opts, model, messages) as any;
     let final: any;
-    if (onText) {
-      const stream = (client.messages as any).stream(params);
-      stream.on("text", (t: string) => onText(t));
-      final = await stream.finalMessage();
-    } else {
-      final = await client.messages.create(params);
+    const send = async (p: any) => {
+      if (onText) {
+        const stream = (client.messages as any).stream(p);
+        stream.on("text", (t: string) => onText(t));
+        return stream.finalMessage();
+      }
+      return client.messages.create(p);
+    };
+    try {
+      final = await send(params);
+    } catch (e) {
+      // If the page-reading tool is not allowed here, fall back to search-only instead of failing.
+      if (!webFetchDisabled && /web_fetch/i.test(msgOf(e)) && /400|invalid_request|not allowed/i.test(msgOf(e))) {
+        console.warn("[ai] web_fetch unavailable; continuing with web search only:", msgOf(e).slice(0, 160));
+        webFetchDisabled = true;
+        final = await send(claudeParams(opts, model, messages));
+      } else {
+        throw e;
+      }
     }
     blocks.push(...(final.content || []));
     if (final.stop_reason !== "pause_turn") break;
@@ -331,7 +387,7 @@ async function claudeGenerate(contents: Contents, opts: AiOptions, models: strin
       const blocks = await claudeRun(opts, model, contents);
       const c = claudeCollect(blocks);
       if (!c.text.trim()) throw new Error("EMPTY_RESPONSE");
-      return { text: c.text, sources: c.sources, searchQueries: c.queries, spans: c.spans, provider: "claude", model };
+      return { text: c.text, sources: c.sources, searchQueries: c.queries, spans: c.spans, provider: "claude", model, fetched: c.fetched };
     } catch (e) {
       lastErr = e;
       console.warn(`[ai] claude ${model} failed: ${msgOf(e).slice(0, 200)}`);
@@ -380,7 +436,7 @@ async function* claudeStream(
       if (failure) throw failure;
       const c = claudeCollect(blocks);
       if (!c.text.trim()) throw new Error("EMPTY_RESPONSE");
-      done({ text: c.text, sources: c.sources, searchQueries: c.queries, spans: c.spans, provider: "claude", model });
+      done({ text: c.text, sources: c.sources, searchQueries: c.queries, spans: c.spans, provider: "claude", model, fetched: c.fetched });
       return;
     } catch (e) {
       lastErr = e;

@@ -432,6 +432,24 @@ export function createApp() {
   app.get("/api/cron/run-cycle", cycle);
   app.post("/api/admin/run-cycle", cycle);
 
+  // ---------- brain exam on the live server (only when EXAM_TOKEN is set; for previews) ----------
+  app.get(
+    "/api/admin/exam",
+    route(async (req, res) => {
+      const token = process.env.EXAM_TOKEN || "";
+      if (token.length < 32 || req.query.token !== token) throw new HttpError(404, "NOT_FOUND", "Not found");
+      const { CASES, runCase, judgeSymmetry } = await import("../scripts/eval.js");
+      if (req.query.symmetry === "1") {
+        const [a, b] = await Promise.all([runCase(CASES.find((c) => c.id === "6a")!), runCase(CASES.find((c) => c.id === "6b")!)]);
+        const sym = a.answer && b.answer ? await judgeSymmetry(a.answer, b.answer) : null;
+        return res.json({ a: { score: a.score, fetched: a.fetched, auto: a.auto, grade: a.grade }, b: { score: b.score, fetched: b.fetched, auto: b.auto, grade: b.grade }, symmetry: sym });
+      }
+      const c = CASES.find((x) => x.id === String(req.query.id || ""));
+      if (!c) throw new HttpError(400, "BAD_REQUEST", "Unknown question id.");
+      res.json(await runCase(c));
+    }),
+  );
+
   // ---------- unknown API routes ----------
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found", code: "NOT_FOUND" }));
 

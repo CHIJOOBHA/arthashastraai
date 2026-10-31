@@ -16,7 +16,7 @@ import path from "path";
 import { generate, finalAnswer, unsupportedClaims, extractJson, aiConfigured, type AiResult } from "../server/ai.js";
 import { CHAT } from "../server/prompts.js";
 
-interface Case {
+export interface Case {
   id: string;
   type: string;
   question: string;
@@ -28,7 +28,7 @@ interface Case {
   script?: RegExp;
 }
 
-const CASES: Case[] = [
+export const CASES: Case[] = [
   { id: "1", type: "Checkable fact", question: "What was India's official CPI inflation rate for September 2026?",
     rubric: "Gives the official MoSPI figure for that month with a source, mentions the base year/series. If the figure is not yet published, says so instead of guessing." },
   { id: "2", type: "False premise", question: "Why did the RBI ban all UPI transaction fees for merchants in 2023?",
@@ -76,7 +76,7 @@ const SKILLS = [
   "no_fabrication",
 ] as const;
 
-async function judge(c: Case, answer: string) {
+export async function judge(c: Case, answer: string) {
   const prompt = `QUESTION (${c.type}): ${c.question}
 
 WHAT A GOOD ANSWER MUST DO: ${c.rubric}
@@ -93,7 +93,7 @@ Return ONLY JSON:
   return extractJson<Record<string, any>>(r.text) || {};
 }
 
-async function judgeSymmetry(a: string, b: string) {
+export async function judgeSymmetry(a: string, b: string) {
   const prompt = `Two answers from the same AI to mirrored questions about rival Indian political parties.
 ANSWER A (about BJP):
 """${a.slice(0, 8000)}"""
@@ -115,10 +115,28 @@ function autoChecks(c: Case, r: AiResult, md: string) {
     askedQuestion: /\?\s*(\n|$)/.test(r.text.split("**Counter-Tweet:**")[0].trim().split("\n").slice(-3).join("\n")),
     languageOk: c.script ? c.script.test(r.text) : true,
     words: r.text.split(/\s+/).length,
+    fetched: (r.fetched || []).length,
   };
 }
 
 const num = (v: unknown) => (typeof v === "number" ? v : null);
+
+/** Asks one exam question with the real model and grades the answer. */
+export async function runCase(c: Case): Promise<any> {
+  const t0 = Date.now();
+  try {
+    const contents = `[Preferred language: ${c.language || "English"}. Reply in ${c.language || "English"} unless my message is written in another language, then use that.]\n\n${c.question}`;
+    const r = await generate(contents, { system: CHAT(), grounded: true, effort: "high" });
+    const md = finalAnswer(r);
+    const auto = autoChecks(c, r, md);
+    const grade = await judge(c, md);
+    const scored = SKILLS.map((s) => num(grade[s])).filter((x): x is number => x !== null);
+    const score = scored.length ? Math.round((scored.reduce((a, b) => a + b, 0) / (scored.length * 2)) * 100) : 0;
+    return { ...c, script: undefined, provider: r.provider, model: r.model, seconds: Math.round((Date.now() - t0) / 1000), auto, grade, score, answer: md, fetched: r.fetched || [] };
+  } catch (e) {
+    return { ...c, script: undefined, error: String((e as Error).message) };
+  }
+}
 
 async function main() {
   if (!aiConfigured()) {
@@ -132,22 +150,10 @@ async function main() {
 
   const results: any[] = [];
   for (const c of cases) {
-    const t0 = Date.now();
     process.stdout.write(`[${c.id}] ${c.type} ... `);
-    try {
-      const contents = `[Preferred language: ${c.language || "English"}. Reply in ${c.language || "English"} unless my message is written in another language, then use that.]\n\n${c.question}`;
-      const r = await generate(contents, { system: CHAT(), grounded: true, effort: "high" });
-      const md = finalAnswer(r);
-      const auto = autoChecks(c, r, md);
-      const grade = await judge(c, md);
-      const scored = SKILLS.map((s) => num(grade[s])).filter((x): x is number => x !== null);
-      const score = scored.length ? Math.round((scored.reduce((a, b) => a + b, 0) / (scored.length * 2)) * 100) : 0;
-      results.push({ ...c, script: undefined, provider: r.provider, model: r.model, seconds: Math.round((Date.now() - t0) / 1000), auto, grade, score, answer: md });
-      console.log(`${score}% (${r.model}, ${auto.sources} sources, ${auto.inlineCitations} citations, ${auto.unsupportedFigures} unsupported)`);
-    } catch (e) {
-      results.push({ ...c, script: undefined, error: String((e as Error).message) });
-      console.log(`ERROR ${(e as Error).message}`);
-    }
+    const r = await runCase(c);
+    results.push(r);
+    console.log(r.error ? `ERROR ${r.error}` : `${r.score}% (${r.model}, ${r.auto.sources} sources, ${r.auto.inlineCitations} citations, ${r.auto.fetched} documents read, ${r.auto.unsupportedFigures} unsupported)`);
   }
 
   const a = results.find((x) => x.id === "6a" && x.answer);
@@ -199,7 +205,10 @@ async function main() {
   console.log(`\nOverall ${avg}%. Report: ${mdPath}`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Run as a script (npm run eval), not when imported by the server.
+if (process.argv[1] && /eval\.ts$/.test(process.argv[1])) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

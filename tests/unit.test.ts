@@ -270,3 +270,50 @@ test("citations never split a number or word across a span boundary", () => {
   );
   assert.equal(md, "Prices multiplied by 1.62 [[1]](https://a.org/x) times since 2014. Wages grew [[1]](https://a.org/x) too.");
 });
+
+test("Claude: main tier can read full documents; their citations map back to the fetched URL", async () => {
+  const calls: any[] = [];
+  ai.__setClaudeClientForTests({
+    messages: {
+      async create(p: any) {
+        calls.push(p);
+        return {
+          stop_reason: "end_turn",
+          content: [
+            { type: "server_tool_use", name: "web_search", input: { query: "rbi atm charges circular" } },
+            { type: "web_fetch_tool_result", content: { type: "web_fetch_result", url: "https://rbi.org.in/circular-a", content: { title: "RBI Circular A" } } },
+            { type: "web_fetch_tool_result", content: { type: "web_fetch_result", url: "https://rbi.org.in/circular-b.pdf", content: { title: "Circular B" } } },
+            { type: "text", text: "Customers may be charged at most ₹23.", citations: [{ type: "page_location", document_index: 1, document_title: "Circular B", cited_text: "₹23" }] },
+            { type: "text", text: " Five free transactions apply.", citations: [{ type: "char_location", document_index: 0, document_title: "RBI Circular A", cited_text: "five" }] },
+          ],
+        };
+      },
+    },
+  });
+  const r = await ai.generate("q", { system: "s", grounded: true });
+  assert.deepEqual(calls[0].tools.map((t: any) => t.type), ["web_search_20250305", "web_fetch_20250910"]);
+  assert.equal(calls[0].tools[1].citations.enabled, true);
+  assert.deepEqual(r.sources.map((s) => s.url), ["https://rbi.org.in/circular-b.pdf", "https://rbi.org.in/circular-a"]);
+  assert.deepEqual(r.spans.map((s) => s.cites), [[0], [1]]);
+
+  await ai.generate("q", { system: "s", grounded: true, tier: "light" });
+  assert.deepEqual(calls[1].tools.map((t: any) => t.type), ["web_search_20250305"], "light tier only searches");
+});
+
+test("Claude: if the page-reading tool is refused, it retries with search only instead of failing", async () => {
+  const calls: any[] = [];
+  ai.__setClaudeClientForTests({
+    messages: {
+      async create(p: any) {
+        calls.push(p);
+        if (p.tools?.some((t: any) => t.type.startsWith("web_fetch"))) {
+          throw new Error("400 invalid_request_error: not allowed to use tool web_fetch_20250910");
+        }
+        return { stop_reason: "end_turn", content: [{ type: "text", text: "Answer from search only.", citations: [] }] };
+      },
+    },
+  });
+  const r = await ai.generate("q", { system: "s", grounded: true });
+  assert.equal(r.text, "Answer from search only.");
+  assert.equal(calls.length, 2);
+});
