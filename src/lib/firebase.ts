@@ -201,30 +201,8 @@ export interface IntelligenceItem {
   source: string;
   content: string;
   timestamp: string;
-  isBroadcasted?: boolean;
   explanationId?: string;
   metadata?: any;
-}
-
-export interface Tweet {
-  id?: string;
-  tweetId: string;
-  author: string;
-  text: string;
-  timestamp: string;
-  processed: boolean;
-  userApproved?: boolean;
-  draftRebuttal?: string;
-  draftLogic?: string;
-}
-
-export interface AgentResponse {
-  id?: string;
-  targetId: string;
-  responseText: string;
-  counterTweet?: string;
-  status: 'pending' | 'posted' | 'failed';
-  timestamp: string;
 }
 
 export interface AgentLog {

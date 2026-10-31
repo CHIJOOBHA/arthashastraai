@@ -57,7 +57,7 @@ function answerFor(prompt: string): string {
   if (prompt.includes("Gazette")) {
     return JSON.stringify({ headline: "Fees, fines and food prices", summary: "Three stories.", stories: [{ title: "Bank fined", whatHappened: "A bank was fined.", whoPays: "Customers.", region: "UK" }] });
   }
-  return "Evidence shows the fee is real.\n\n**Counter-Tweet:** Check your statement.";
+  return "Evidence shows the fee is real.\n\n**Bottom line:** Check your statement.";
 }
 const promptOf = (args: any) => JSON.stringify(args.contents);
 const fakeGemini = {

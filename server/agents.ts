@@ -192,7 +192,6 @@ async function publish(block: SubtopicBlock, taskId: string, insights: Insight[]
         country: i.country,
         explanationId: id,
         sources: i.sources,
-        isBroadcasted: false,
         metadata: {
           severity: i.severity,
           confidence: `${i.verdict === "confirmed" ? "Confirmed" : "Partly confirmed"} · ${new Set(i.sources.map((s) => domainOf(s.url))).size} source(s)`,
