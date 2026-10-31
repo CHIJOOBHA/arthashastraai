@@ -274,7 +274,7 @@ function claudeParams(opts: AiOptions, model: string, messages: any[]) {
     output_config: { effort },
   };
   if (opts.grounded) {
-    params.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: opts.maxSearches ?? 6 }];
+    params.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: opts.maxSearches ?? 8 }];
   }
   return params;
 }
@@ -571,12 +571,16 @@ export function sourceLabel(s: Source): string {
 }
 
 /** Markdown footer: numbered sources, search queries, and any unsupported figures. */
-export function sourcesMarkdown(sources: Source[], queries: string[] = [], unsupported: string[] = []): string {
+export function sourcesMarkdown(sources: Source[], queries: string[] = [], unsupported: string[] = [], text = ""): string {
   if (!sources.length) {
-    return "\n\n---\n_No live web sources were found for this answer. Treat every figure in it as unverified._";
+    // Only warn when the answer actually states figures (a clarifying question needs no sources).
+    return /\d/.test(text.replace(/\*\*Counter-Tweet:\*\*[\s\S]*$/, ""))
+      ? "\n\n---\n_No live web sources were found for this answer. Treat every figure in it as unverified._"
+      : "";
   }
+  // List every cited source so each [n] in the text has a matching entry.
   const listMd = sources
-    .slice(0, 12)
+    .slice(0, 40)
     .map((s, i) => `${i + 1}. [${sourceLabel(s).replace(/[\[\]]/g, "")}](${s.url})`)
     .join("\n");
   const q = queries.length
@@ -592,6 +596,6 @@ export function sourcesMarkdown(sources: Source[], queries: string[] = [], unsup
 }
 
 /** The full, final answer as shown to users: inline citations + sources footer. */
-export function finalAnswer(r: Pick<AiResult, "spans" | "sources" | "searchQueries">): string {
-  return citedText(r.spans, r.sources).trim() + sourcesMarkdown(r.sources, r.searchQueries, unsupportedClaims(r.spans));
+export function finalAnswer(r: Pick<AiResult, "spans" | "sources" | "searchQueries"> & { text?: string }): string {
+  return citedText(r.spans, r.sources).trim() + sourcesMarkdown(r.sources, r.searchQueries, unsupportedClaims(r.spans), r.text ?? r.spans.map((s) => s.text).join(""));
 }

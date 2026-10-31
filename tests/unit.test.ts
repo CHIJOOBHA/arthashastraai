@@ -118,7 +118,8 @@ test("sourcesMarkdown lists sources and warns when there are none", () => {
   assert.match(md, /\*\*Sources\*\*/);
   assert.match(md, /\[RBI notice\]\(https:\/\/rbi\.org\.in\/x\)/);
   assert.match(md, /google\.com\/search\?q=inflation%20india/);
-  assert.match(sourcesMarkdown([]), /unverified/);
+  assert.match(sourcesMarkdown([], [], [], "Fees rose 12% last year."), /unverified/);
+  assert.equal(sourcesMarkdown([], [], [], "Which country are you in?"), "");
 });
 
 test("ledger hash matches the browser formula", async () => {
