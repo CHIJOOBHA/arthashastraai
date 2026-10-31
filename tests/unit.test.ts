@@ -256,3 +256,17 @@ test("agents: dates must be recent and real", async () => {
   assert.equal(isRecent("2027-01-01", 35, now), false);
   assert.equal(isRecent("not a date", 35, now), false);
 });
+
+test("citations never split a number or word across a span boundary", () => {
+  const sources = [{ title: "A", url: "https://a.org/x" }];
+  const md = ai.citedText(
+    [
+      { text: "Prices multiplied by 1.", cites: [0] },
+      { text: "62 times since 2014.", cites: [] },
+      { text: " Wages grew", cites: [0] },
+      { text: " too.", cites: [] },
+    ],
+    sources,
+  );
+  assert.equal(md, "Prices multiplied by 1.62 [[1]](https://a.org/x) times since 2014. Wages grew [[1]](https://a.org/x) too.");
+});

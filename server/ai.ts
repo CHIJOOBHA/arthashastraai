@@ -538,20 +538,47 @@ export function unsupportedClaims(spans: Span[]): string[] {
   return [...new Set(out)].slice(0, 6);
 }
 
-/** The answer with inline [n] citation links after each supported span. */
+/**
+ * The answer with inline [n] citation links after each supported span.
+ * Providers sometimes end a cited span in the middle of a number or word
+ * ("by 1." + "62 times"), so a marker is moved forward to the next word boundary
+ * instead of splitting the token.
+ */
 export function citedText(spans: Span[], sources: Source[]): string {
-  return spans
-    .map((s) => {
-      if (!s.cites.length) return s.text;
+  let out = "";
+  let pending = "";
+  const flushAt = (text: string) => {
+    // Place pending markers at the first boundary (space/newline or end of sentence) in `text`.
+    const m = /^[^\s]*?(?:[.,;:!?)\]](?=\s|$)|(?=\s)|$)/.exec(text);
+    const cut = m ? m[0].length : 0;
+    return text.slice(0, cut) + ` ${pending}` + text.slice(cut);
+  };
+  for (const s of spans) {
+    let text = s.text;
+    if (pending) {
+      text = /^\s/.test(text) || !text ? text : flushAt(text);
+      if (/^\s/.test(s.text) || !s.text) out = out.replace(/(\s*)$/, ` ${pending}$1`);
+      pending = "";
+    }
+    if (s.cites.length) {
       const marks = s.cites
         .slice(0, 3)
         .map((i) => `[[${i + 1}]](${sources[i]?.url ?? "#"})`)
         .join("");
-      // Put markers before trailing whitespace/newlines so they stay on the same line.
-      const m = s.text.match(/^([\s\S]*?)(\s*)$/)!;
-      return `${m[1]} ${marks}${m[2]}`;
-    })
-    .join("");
+      const m = text.match(/^([\s\S]*?)(\s*)$/)!;
+      if (m[2] === "" && /[\p{L}\p{N}]$|\d[.,]$/u.test(m[1])) {
+        // Ends mid-token: decide when we see the next span.
+        out += text;
+        pending = marks;
+        continue;
+      }
+      out += `${m[1]} ${marks}${m[2]}`;
+    } else {
+      out += text;
+    }
+  }
+  if (pending) out = out.replace(/(\s*)$/, ` ${pending}$1`);
+  return out;
 }
 
 /** "Title (site)", or just the site when the page title is missing or junk (e.g. a timestamp). */
