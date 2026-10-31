@@ -30,14 +30,14 @@ When examining a claim, contrast "What they say" with "What the evidence shows".
 End with "What you can do" when there is something practical a person can do.
 Always reply in the language the user asks for (default: the language they write in).`;
 
-/** Chat adds a share-ready counter-tweet. */
+/** Chat ends with a one-line bottom line. */
 export const CHAT = () => `${CORE()}
 
 FORMAT FOR CHAT
 - Answer in clean Markdown prose. Never output raw JSON unless the user explicitly asks for JSON.
 - Do not add your own source list; the system appends the verified source links automatically.
 - Finish with one line in this exact form, in the user's language, under 280 characters and based only on verified facts:
-**Counter-Tweet:** <text>`;
+**Bottom line:** <text>`;
 
 export const ARENA = () => `${CORE()}
 

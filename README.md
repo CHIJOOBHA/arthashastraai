@@ -7,7 +7,7 @@ Arthashastra AI shows people, in plain language and in their own language, how t
 
 | Feature | What happens |
 |---|---|
-| **Chat** | Ask anything in 15 languages. The AI searches the web (Google Search grounding), answers, lists its sources, and adds a share-ready "Counter-Tweet". |
+| **Chat** | Ask anything in 15 languages. The AI searches the web (Google Search grounding), answers, lists its sources, and ends with a one-line "Bottom line". |
 | **Intelligence feed** | 12 agents (Chanakya-01 … Akasha-12) rotate daily across 12 watch-desks. Each desk: *search real reports → independent second search to fact-check → plain-language "who pays / what you can do"*. Only confirmed items are published, with their sources. |
 | **Explanations** | Deep dive on each feed item. 3 free, then subscription. |
 | **The Arena** | Public debates. Users post arguments; the AI gives a sourced verdict and replies. |
