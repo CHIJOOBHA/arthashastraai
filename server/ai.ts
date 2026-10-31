@@ -497,23 +497,43 @@ export function extractJson<T = unknown>(text: string): T | null {
 // ---------------------------------------------------------------------------
 const COUNTER_TWEET = /\*\*Counter-Tweet:\*\*/i;
 
+/** Numbers in a text, normalised ("₹5,000" -> "5000", "3.1%" -> "3.1"). */
+const numbersIn = (t: string) => (t.match(/\d[\d,]*(?:\.\d+)?/g) || []).map((n) => n.replace(/,/g, ""));
+
 /**
- * Sentences that state a number (amount, %, year, count) but have no supporting
- * source. These are the riskiest kind of claim, so we show them to the reader.
+ * Sentences that state a figure which appears in NO cited passage. These are the
+ * riskiest claims, so we show them to the reader. Work at sentence level over the
+ * whole answer: a sentence counts as sourced if any part of it is cited, or if all
+ * its numbers appear in cited passages (e.g. restating a cited figure).
+ * Calculations ("a + b = c") and questions are not flagged.
  */
 export function unsupportedClaims(spans: Span[]): string[] {
-  const out: string[] = [];
+  const citedNumbers = new Set(spans.filter((s) => s.cites.length).flatMap((s) => numbersIn(s.text)));
+  // Rebuild the text with a marker for which characters are cited.
+  let text = "";
+  const cited: boolean[] = [];
   for (const s of spans) {
-    if (s.cites.length) continue;
-    for (const raw of s.text.split(/(?<=[.!?।])\s+|\n+/)) {
-      // Strip Markdown list/heading/quote markers only (keep numbers that start a sentence).
-      const sentence = raw.replace(/^\s*(?:[#>*\-]+|\d+[.)])\s+/, "").replace(/\*\*/g, "").trim();
-      if (sentence.length < 15 || COUNTER_TWEET.test(raw)) continue;
-      if (/\?\s*$/.test(sentence)) continue; // questions are not claims
-      if (!/\d/.test(sentence)) continue;
-      if (/^(assuming|step|\d+\.\s)/i.test(sentence)) continue;
-      out.push(sentence.length > 220 ? `${sentence.slice(0, 217)}...` : sentence);
-    }
+    text += s.text;
+    for (let i = 0; i < s.text.length; i++) cited.push(s.cites.length > 0);
+  }
+  const out: string[] = [];
+  // A sentence ends at . ! ? । followed by a space/newline/end (so "3.1%" is not split).
+  const re = /(?:[^\n.!?।]|[.!?।](?=[^\s.!?।]))+(?:[.!?।]+|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const raw = m[0];
+    const start = m.index;
+    if (cited.slice(start, start + raw.length).some(Boolean)) continue;
+    const lineStart = text.lastIndexOf("\n", start) + 1;
+    const lineEnd = text.indexOf("\n", start);
+    if (COUNTER_TWEET.test(text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd))) continue;
+    // Strip Markdown list/heading/quote markers and bold (keep numbers that start a sentence).
+    const sentence = raw.replace(/^\s*(?:[#>*\-]+|\d+[.)])\s+/, "").replace(/\*\*/g, "").trim();
+    if (sentence.length < 15 || /\?\s*$/.test(sentence) || /=/.test(sentence)) continue;
+    const nums = numbersIn(sentence).filter((n) => !/^(19|20)\d\d$/.test(n) || !citedNumbers.has(n));
+    if (!nums.length) continue;
+    if (nums.every((n) => citedNumbers.has(n))) continue;
+    out.push(sentence.length > 220 ? `${sentence.slice(0, 217)}...` : sentence);
   }
   return [...new Set(out)].slice(0, 6);
 }
@@ -534,6 +554,22 @@ export function citedText(spans: Span[], sources: Source[]): string {
     .join("");
 }
 
+/** "Title (site)", or just the site when the page title is missing or junk (e.g. a timestamp). */
+export function sourceLabel(s: Source): string {
+  let host = "";
+  try {
+    host = new URL(s.url).hostname.replace(/^www\./, "");
+  } catch {
+    /* keep empty */
+  }
+  const title = (s.title || "").replace(/\s+/g, " ").trim();
+  const letters = (title.match(/\p{L}/gu) || []).length;
+  const junk = !title || letters < 8 || /^\w+ \d{1,2}, \d{4}/.test(title) || /^(sunday|monday|tuesday|wednesday|thursday|friday|saturday),/i.test(title) || title === s.url;
+  if (junk) return host || s.url;
+  const short = title.length > 90 ? `${title.slice(0, 87)}...` : title;
+  return host && !short.toLowerCase().includes(host.split(".")[0]) ? `${short} (${host})` : short;
+}
+
 /** Markdown footer: numbered sources, search queries, and any unsupported figures. */
 export function sourcesMarkdown(sources: Source[], queries: string[] = [], unsupported: string[] = []): string {
   if (!sources.length) {
@@ -541,7 +577,7 @@ export function sourcesMarkdown(sources: Source[], queries: string[] = [], unsup
   }
   const listMd = sources
     .slice(0, 12)
-    .map((s, i) => `${i + 1}. [${s.title.replace(/[\[\]]/g, "")}](${s.url})`)
+    .map((s, i) => `${i + 1}. [${sourceLabel(s).replace(/[\[\]]/g, "")}](${s.url})`)
     .join("\n");
   const q = queries.length
     ? `\n\n_Searched: ${queries

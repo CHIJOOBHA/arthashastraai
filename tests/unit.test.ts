@@ -163,11 +163,17 @@ test("citations: supported spans get inline [n] links; unsupported figures are f
   assert.doesNotMatch(md.split("Not matched")[1], /Counter-Tweet/);
 });
 
-test("unsupportedClaims ignores questions, headings without numbers and short fragments", () => {
+test("unsupportedClaims: restated cited figures and calculations are not flagged; new figures are", () => {
   const out = ai.unsupportedClaims([
-    { text: "## What is claimed\nWhich country are you in? Prices rose.\nIn 2024 wages grew 9% in nominal terms.\n- 5% of loans went bad.\nParty X got 6,000 crore.", cites: [] },
+    { text: "The cap is ₹23 per withdrawal from 2025.", cites: [0] },
+    { text: "\n## What is claimed\nWhich country are you in? So ₹23 is the legal maximum.\nSo ₹23 + ₹4.14 = ₹27.14 in total.\nIn 2024 wages grew 9% in nominal terms.\n- 5% of loans went bad.\nParty X got 6,000 crore.", cites: [] },
   ]);
   assert.deepEqual(out, ["In 2024 wages grew 9% in nominal terms.", "5% of loans went bad.", "Party X got 6,000 crore."]);
+});
+
+test("sourceLabel replaces junk page titles with the site name", () => {
+  assert.equal(ai.sourceLabel({ title: "March 28, 2025 6:10 PM", url: "https://www.newsonair.gov.in/x" }), "newsonair.gov.in");
+  assert.equal(ai.sourceLabel({ title: "ATM withdrawals to cost more", url: "https://www.business-standard.com/a" }), "ATM withdrawals to cost more (business-standard.com)");
 });
 
 /** A fake Anthropic client returning web-search citations, with one pause_turn continuation. */

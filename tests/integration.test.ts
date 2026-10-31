@@ -188,7 +188,8 @@ test("agent cycle publishes ONLY independently verified items, with sources, and
   // The corrected text (4.8 million) is what gets explained and published, not the collector's 5 million.
   const exp = await db.collection("explanations").doc(item.get("explanationId")).get();
   assert.match(exp.get("content"), /4\.8 million/);
-  assert.doesNotMatch(exp.get("content"), /5 million/);
+  // The fact-check note may mention the wrong figure; the story text itself must not.
+  assert.doesNotMatch(exp.get("content").split("**Fact-check:**")[0], /\b5 million/);
 
   // Re-running does not duplicate stories.
   await request(app).get("/api/cron/run-cycle?budgetMs=100000").set("Authorization", "Bearer test_cron_secret");
