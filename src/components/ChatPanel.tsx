@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Calendar, ChevronRight, Clock, Copy, Landmark, Link2, Loader2, Share2, User as UserIcon } from 'lucide-react';
+import { Calendar, ChevronRight, Clock, Copy, Landmark, Loader2, Share2, User as UserIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { LogicProof } from './LogicProof';
 import { toDate, type Message } from '../lib/firebase';
@@ -189,12 +189,6 @@ export function ChatPanel(props: ChatPanelProps) {
                         </time>
                       )}
                     </div>
-                    {msg.hash && (
-                      <span className="inline-flex items-center gap-5 text-[9px] font-mono text-neon-cyan/55" title={t.hashChainedNote}>
-                        <Link2 className="w-10 h-10" aria-hidden />
-                        {t.hashChained} · {msg.hash.slice(0, 8)}
-                      </span>
-                    )}
                   </div>
 
                   {isUser || msg.error ? (

@@ -109,7 +109,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
         <div className="flex items-center justify-between mb-13 border-b border-neon-cyan/8 pb-8">
           <div className="flex items-center gap-13">
             <Clock className="w-21 h-21 text-neon-cyan drop-shadow-[0_0_5px_rgba(0,240,255,0.5)]" />
-            <h2 className="text-13 caps-modern text-neon-cyan tracking-widest uppercase drop-shadow-[0_0_5px_rgba(0,240,255,0.5)]">Temporal Archive</h2>
+            <h2 className="text-13 caps-modern text-neon-cyan tracking-widest uppercase drop-shadow-[0_0_5px_rgba(0,240,255,0.5)]">Your chats</h2>
           </div>
           <div className="flex items-center gap-8">
             <button 
@@ -286,7 +286,7 @@ export function AitihyaHistory({ onSelectConversation, activeChatId, selectedDat
           <span className="text-[9px] caps-modern text-neon-cyan/55 font-bold uppercase tracking-widest">Your conversations</span>
           <span className="text-[9px] font-mono text-neon-cyan bg-neon-cyan/13 px-5 py-1 rounded border border-neon-cyan/34 flex items-center gap-5">
             <div className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
-            {filtered.length} THREADS
+            {filtered.length} {filtered.length === 1 ? "CHAT" : "CHATS"}
           </span>
         </div>
         {!user ? (

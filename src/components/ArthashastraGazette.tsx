@@ -26,6 +26,8 @@ const shiftYmd = (s: string, days: number) => {
   return toYmd(d);
 };
 const localToday = () => toYmd(new Date());
+/** Only http(s) links are ever made clickable (blocks javascript: and data: links). */
+const safeHref = (u: unknown) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : undefined);
 /** The server dates editions in UTC; it can be a day ahead of the reader's local date. */
 const utcToday = () => new Date().toISOString().slice(0, 10);
 const latestAllowed = () => (utcToday() > localToday() ? utcToday() : localToday());
@@ -34,7 +36,7 @@ const isValidYmd = (s?: string) => !!s && YMD_RE.test(s) && !isNaN(fromYmd(s).ge
 const POLL_EVERY_MS = 10_000;
 const POLL_MAX_MS = 180_000;
 
-export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
+export function ArthashastraGazette({ initialDate, user, isAdmin = false }: GazetteProps) {
   const [selectedDate, setSelectedDate] = useState(() => (isValidYmd(initialDate) ? initialDate! : localToday()));
   const [chronicle, setChronicle] = useState<Chronicle | null>(null);
   const [loading, setLoading] = useState(false);
@@ -318,7 +320,7 @@ export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
                         <ul className="space-y-2 text-[11px]" aria-label="Sources for this story">
                           {story.sources.map((src, i) => (
                             <li key={src.url}>
-                              <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" className="text-neon-cyan/89 hover:underline break-all">
+                              <a href={safeHref(src.url)} target="_blank" rel="noopener noreferrer nofollow" className="text-neon-cyan/89 hover:underline break-all">
                                 [{i + 1}] {src.title}
                               </a>
                             </li>
@@ -338,7 +340,7 @@ export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
                     {chronicle.sources.map((src, i) => (
                       <li key={i} className="text-13 text-parchment/55 leading-tight flex items-start gap-8">
                         <ExternalLink className="w-[11px] h-[11px] mt-[3px] text-neon-cyan/55 shrink-0" />
-                        <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" className="hover:text-neon-cyan underline decoration-neon-cyan/21 break-words">
+                        <a href={safeHref(src.url)} target="_blank" rel="noopener noreferrer nofollow" className="hover:text-neon-cyan underline decoration-neon-cyan/21 break-words">
                           {src.title || src.url}
                         </a>
                       </li>
@@ -367,9 +369,9 @@ export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
                   {loadError
                     ? loadError
                     : isTodayish
-                      ? user
-                        ? "Today's edition hasn't been written yet. You can ask for it now; it takes about a minute and is shared with every reader."
-                        : "Today's edition hasn't been written yet. Sign in to request it, or check back later."
+                      ? isAdmin
+                        ? "Today's edition hasn't been written yet. As admin you can write it now; it takes 1–3 minutes and is shared with every reader."
+                        : "Today's edition is written automatically every morning (around 7:30 AM India time). Please check back soon."
                       : 'There is no edition for this date. Pick another date from the list.'}
                 </p>
               </div>
@@ -381,7 +383,7 @@ export function ArthashastraGazette({ initialDate, user }: GazetteProps) {
                 </div>
               )}
 
-              {user && isTodayish && (
+              {isAdmin && isTodayish && (
                 <button
                   onClick={handleGenerate}
                   disabled={generating}

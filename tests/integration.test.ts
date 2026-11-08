@@ -23,6 +23,8 @@ process.env.AITIHYA_SIGNING_SECRET = "test_ledger_secret";
 process.env.CRON_SECRET = "test_cron_secret";
 process.env.DAILY_LIMIT_ANONYMOUS = "2";
 process.env.DAILY_LIMIT_FREE = "4";
+process.env.DAILY_LIMIT_ANONYMOUS_DEVICE = "3";
+process.env.GLOBAL_DAILY_AI_LIMIT = "1000";
 process.env.ADMIN_EMAILS = "";
 
 let request: any, app: any, db: any;
@@ -155,12 +157,41 @@ test("chat streams an answer with real source links appended", { skip }, async (
 
 test("daily quota is enforced per user (anonymous limit 2)", { skip }, async () => {
   const u = await signUp();
-  const call = () => request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).send({ message: "hi" });
+  const call = () => request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).set("X-Real-IP", "10.0.0.1").send({ message: "hi" });
   assert.equal((await call()).status, 200);
   assert.equal((await call()).status, 200);
   const third = await call();
   assert.equal(third.status, 429);
   assert.equal(third.body.code, "DAILY_LIMIT");
+});
+
+test("guests cannot dodge the limit by making new anonymous accounts (per-device cap 3)", { skip }, async () => {
+  const ask = async (ip: string) => {
+    const u = await signUp();
+    return request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).set("X-Real-IP", ip).send({ message: "hi" });
+  };
+  // Three fresh guest accounts from one device: allowed.
+  for (let i = 0; i < 3; i++) assert.equal((await ask("10.0.0.2")).status, 200);
+  // A fourth fresh guest account from the same device is blocked…
+  const blocked = await ask("10.0.0.2");
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.code, "DAILY_LIMIT");
+  // …while another device is unaffected.
+  assert.equal((await ask("10.0.0.3")).status, 200);
+  // Raw IP addresses are never stored, only a salted hash.
+  const docs = await db.collection("usage_ip").get();
+  assert.ok(docs.size >= 1);
+  for (const d of docs.docs) assert.ok(!d.id.includes("10.0.0"), "raw IP must not be stored");
+});
+
+test("site-wide daily AI cap stops everything once reached", { skip }, async () => {
+  const date = new Date().toISOString().slice(0, 10);
+  await db.collection("system").doc(`ai_budget_${date}`).set({ count: 1000 });
+  const u = await signUp("capped@example.com");
+  const res = await request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).send({ message: "hi" });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.code, "DAILY_CAPACITY");
+  await db.collection("system").doc(`ai_budget_${date}`).set({ count: 0 });
 });
 
 test("message validation", { skip }, async () => {
@@ -316,17 +347,24 @@ test("share builds the transcript from stored messages; only the owner can share
   ]);
 });
 
-test("gazette is generated once per day and cached", { skip }, async () => {
+test("gazette is written by the daily cron, cached, and readers cannot trigger it", { skip }, async () => {
   const u = await signUp("gazette@example.com");
-  const first = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
-  assert.equal(first.status, 200, JSON.stringify(first.body));
-  assert.equal(first.body.status, "ready");
-  assert.ok(first.body.sources.length >= 2);
-  assert.equal(first.body.stories.length, 1);
-  assert.equal(first.body.stories[0].verdict, "corrected");
-  assert.ok(first.body.stories[0].sources.length >= 2);
-  const second = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
-  assert.equal(second.body.headline, first.body.headline);
+  const denied = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
+  assert.equal(denied.status, 403);
+  const noSecret = await request(app).get("/api/cron/gazette");
+  assert.equal(noSecret.status, 401);
+
+  const cron = await request(app).get("/api/cron/gazette").set("Authorization", "Bearer test_cron_secret");
+  assert.equal(cron.status, 200, JSON.stringify(cron.body));
+  assert.equal(cron.body.status, "ready");
+  const first = (await db.collection("chronicles").doc(new Date().toISOString().slice(0, 10)).get()).data();
+  assert.equal(first.status, "ready");
+  assert.ok(first.sources.length >= 2);
+  assert.equal(first.stories.length, 1);
+  assert.equal(first.stories[0].verdict, "corrected");
+  assert.ok(first.stories[0].sources.length >= 2);
+  const second = await request(app).get("/api/cron/gazette").set("Authorization", "Bearer test_cron_secret");
+  assert.equal(second.body.status, "ready");
 });
 
 test("risk radar is saved with its sources", { skip }, async () => {

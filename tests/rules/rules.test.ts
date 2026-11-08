@@ -154,13 +154,25 @@ test("public reads work logged out where intended", { skip }, async () => {
   await assertSucceeds(getDoc(doc(admin(), "agent_logs/l1")));
 });
 
-test("temporal blocks and cold archives are private", { skip }, async () => {
-  await assertSucceeds(setDoc(doc(alice(), "temporal_blocks/alice_2026-10-26"), { userId: "alice", messages: [] }));
+test("retired calendar and cold archives: private, read/delete only, no new writes", { skip }, async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), "temporal_blocks/alice_2026-10-26"), { userId: "alice", messages: [] });
+    await setDoc(doc(ctx.firestore(), "cold_archives/a1"), { userId: "alice", data: "x" });
+  });
+  await assertFails(setDoc(doc(alice(), "temporal_blocks/alice_2026-10-27"), { userId: "alice", messages: [] }));
   await assertFails(setDoc(doc(bob(), "temporal_blocks/alice_2026-10-27"), { userId: "bob" }));
   await assertFails(getDoc(doc(bob(), "temporal_blocks/alice_2026-10-26")));
+  await assertSucceeds(getDoc(doc(alice(), "temporal_blocks/alice_2026-10-26")));
   await assertSucceeds(getDocs(query(collection(alice(), "temporal_blocks"), where("userId", "==", "alice"))));
-  await assertSucceeds(addDoc(collection(alice(), "cold_archives"), { userId: "alice", data: "x" }));
-  await assertFails(addDoc(collection(bob(), "cold_archives"), { userId: "alice", data: "x" }));
+  await assertFails(addDoc(collection(alice(), "cold_archives"), { userId: "alice", data: "x" }));
+  await assertFails(getDoc(doc(bob(), "cold_archives/a1")));
+  await assertSucceeds(deleteDoc(doc(alice(), "cold_archives/a1")));
+  await assertSucceeds(deleteDoc(doc(alice(), "temporal_blocks/alice_2026-10-26")));
+});
+
+test("audit log entries are size-capped", { skip }, async () => {
+  await assertSucceeds(addDoc(collection(alice(), "audit_log"), { userId: "alice", action: "EXPORT", details: "ok", timestamp: serverTimestamp() }));
+  await assertFails(addDoc(collection(alice(), "audit_log"), { userId: "alice", action: "EXPORT", details: "x".repeat(5000), timestamp: serverTimestamp() }));
 });
 
 test("owners can delete their own data (right to erasure)", { skip }, async () => {

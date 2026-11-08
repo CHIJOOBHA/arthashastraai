@@ -3,8 +3,8 @@ import { motion } from 'motion/react';
 import { onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import {
-  Activity, Archive, Clock, Coins, CreditCard, Download, Ghost, Landmark, LayoutDashboard, Loader2, LogIn, LogOut,
-  MessageSquare, Newspaper, Plus, Radio, Send, Shield, ShieldAlert, X, Zap,
+  Activity, Clock, Coins, Download, Ghost, Landmark, LayoutDashboard, Loader2, LogIn, LogOut,
+  MessageSquare, Mic, MicOff, Newspaper, Plus, Send, ShieldAlert, X, Zap,
 } from 'lucide-react';
 
 import { auth, db, handleFirestoreError, OperationType, signInAnonymous, signInWithGoogle, signOut, type AgentLog } from '../lib/firebase';
@@ -13,6 +13,7 @@ import { saveMessage, getMessages, getConversations, createSharedTranscript } fr
 import { witnessBlock } from '../lib/aitihya';
 import { SUPPORTED_LANGUAGES, getTranslation } from '../translations';
 import { useLanguage, languageName } from '../hooks/useLanguage';
+import { useVoiceInput } from '../hooks/useVoiceInput';
 import { navigate } from '../hooks/useRoute';
 import { usePayment } from '../hooks/usePayment';
 
@@ -24,7 +25,6 @@ import { ArthashastraGazette } from './ArthashastraGazette';
 import { TheArena } from './TheArena';
 import { TheWarChest } from './TheWarChest';
 import { DataSovereignty } from './DataSovereignty';
-import { ArchiveOS } from './ArchiveOS';
 import { EconomicDisasterPredictor } from './EconomicDisasterPredictor';
 import { ChatPanel, type ChatMessage } from './ChatPanel';
 import { IntelFeedView, type IntelItem } from './IntelFeed';
@@ -33,10 +33,12 @@ import { ExplanationView } from './ExplanationView';
 import { BrainView, DashboardView, HealthBanner, LedgerEntries, RoutineView, runAgentsMessage, type LedgerEntry } from './AdminViews';
 
 type View =
-  | 'chat' | 'gazette' | 'feed' | 'archive' | 'ledger' | 'arena' | 'warchest' | 'sovereignty' | 'threat'
+  | 'chat' | 'today' | 'gazette' | 'feed' | 'archive' | 'ledger' | 'arena' | 'warchest' | 'sovereignty' | 'threat'
   | 'plan' | 'explanation' | 'dashboard' | 'brain' | 'routine';
 
-const ADMIN_VIEWS: View[] = ['dashboard', 'brain', 'routine'];
+const ADMIN_VIEWS: View[] = ['dashboard', 'brain', 'routine', 'ledger'];
+/** Public debates are hidden until they can be moderated. */
+const SHOW_ARENA = false;
 const CHAT_KEY = 'arthashastra_active_chat';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -277,6 +279,14 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
   // ---------- chat ----------
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
+  // Speak-your-question: spoken words are added after whatever was already typed.
+  const voiceBase = useRef('');
+  const voice = useVoiceInput(language, (spoken) => setInput((voiceBase.current ? voiceBase.current + ' ' : '') + spoken));
+  const toggleVoice = () => {
+    if (voice.listening) return voice.stop();
+    voiceBase.current = input.trim();
+    voice.start();
+  };
   const [isSending, setIsSending] = useState(false);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
@@ -574,6 +584,11 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
         <a href="/terms" onClick={goLegal('/terms')} className="hover:text-neon-cyan">{t.terms}</a>
         <a href="/privacy" onClick={goLegal('/privacy')} className="hover:text-neon-cyan">{t.privacy}</a>
         <a href="/refunds" onClick={goLegal('/refunds')} className="hover:text-neon-cyan">{t.refunds}</a>
+        {user && (
+          <button type="button" onClick={() => setView('sovereignty')} className="uppercase tracking-widest hover:text-neon-cyan">
+            {t.navSovereignty}
+          </button>
+        )}
       </nav>
     </footer>
   );
@@ -648,20 +663,20 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
   }
 
   // ---------- main ----------
+  // Kept short on purpose: ordinary people need to ask, see today's stories, and check risks.
+  // Debates (Arena) stay off until there is moderation; turn SHOW_ARENA on to bring them back.
+  // "My data" lives in the footer; plans open from the chat when a limit is reached.
+  const paymentsOn = me?.paymentsEnabled === true;
   const navItems: { id: View; icon: typeof MessageSquare; label: string; admin?: boolean }[] = [
     { id: 'chat', icon: MessageSquare, label: t.navTerminal },
-    { id: 'feed', icon: Radio, label: t.navFeed },
-    { id: 'gazette', icon: Newspaper, label: t.navGazette },
-    { id: 'archive', icon: Archive, label: t.navDossier },
-    { id: 'ledger', icon: Clock, label: t.navArchive },
-    { id: 'arena', icon: Landmark, label: t.navArena },
+    { id: 'today', icon: Newspaper, label: t.navToday },
     { id: 'threat', icon: ShieldAlert, label: t.navThreat },
-    { id: 'warchest', icon: Coins, label: t.navWarchest },
-    { id: 'sovereignty', icon: Shield, label: t.navSovereignty },
-    { id: 'plan', icon: CreditCard, label: t.navPlan },
+    ...(SHOW_ARENA ? [{ id: 'arena' as View, icon: Landmark, label: t.navArena }] : []),
+    ...(paymentsOn ? [{ id: 'warchest' as View, icon: Coins, label: t.navWarchest }] : []),
     ...(isAdmin
       ? ([
           { id: 'dashboard', icon: LayoutDashboard, label: t.navDashboard, admin: true },
+          { id: 'ledger', icon: Clock, label: t.ledgerAdminTitle, admin: true },
           { id: 'brain', icon: Zap, label: t.navBrain, admin: true },
           { id: 'routine', icon: Activity, label: t.navHealth, admin: true },
         ] as const)
@@ -727,7 +742,17 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
   } else if (view === 'brain') content = <BrainView {...adminProps} />;
   else if (view === 'routine') content = <RoutineView {...adminProps} />;
   else if (view === 'dashboard') content = <DashboardView {...adminProps} />;
-  else if (view === 'feed') content = <IntelFeedView items={intelligence} t={t} onOpenExplanation={openExplanation} />;
+  else if (view === 'today' || view === 'feed' || view === 'gazette')
+    content = (
+      <div className="space-y-34">
+        <div className="relative overflow-hidden glass-panel border border-neon-cyan/21 rounded-13 mt-21">
+          <ErrorBoundary>
+            <ArthashastraGazette user={user} language={langName} isAdmin={isAdmin} />
+          </ErrorBoundary>
+        </div>
+        <IntelFeedView items={intelligence} t={t} onOpenExplanation={openExplanation} />
+      </div>
+    );
   else if (view === 'explanation' && activeExplanationId)
     content = (
       <ExplanationView
@@ -737,12 +762,12 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
         language={language}
         onPaywall={() => openPlans(t.paywallNotice)}
         onLoaded={refreshMe}
-        onBack={() => setView('feed')}
+        onBack={() => setView('today')}
       />
     );
   else if (view === 'plan')
     content = <PlanView t={t} me={me} isAnonymous={user.isAnonymous} notice={planNotice} onSubscribe={startCheckout} isPaying={isPaying} />;
-  else if (view === 'arena')
+  else if (view === 'arena' && SHOW_ARENA)
     content = (
       <ErrorBoundary>
         <TheArena {...childProps} />
@@ -765,20 +790,6 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
       <ErrorBoundary>
         <EconomicDisasterPredictor {...childProps} />
       </ErrorBoundary>
-    );
-  else if (view === 'archive')
-    content = (
-      <ErrorBoundary>
-        <ArchiveOS user={user} language={langName} isAdmin={isAdmin} onNavigateToChat={(id) => loadConversation(id, { fromUser: true })} />
-      </ErrorBoundary>
-    );
-  else if (view === 'gazette')
-    content = (
-      <div className="relative overflow-hidden glass-panel border border-neon-cyan/21 rounded-13 min-h-[80vh] mt-21">
-        <ErrorBoundary>
-          <ArthashastraGazette user={user} language={langName} isAdmin={isAdmin} />
-        </ErrorBoundary>
-      </div>
     );
   else if (view === 'ledger')
     content = (
@@ -877,7 +888,7 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
 
             <nav className="flex items-center gap-5 lg:gap-8 overflow-x-auto silk-scroll flex-1 pb-3 min-w-0" aria-label="Main">
               {navItems.map((item) => {
-                const active = view === item.id || (item.id === 'feed' && view === 'explanation');
+                const active = view === item.id || (item.id === 'today' && (view === 'explanation' || view === 'feed' || view === 'gazette'));
                 return (
                   <button
                     key={item.id}
@@ -928,7 +939,7 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
         </div>
       </header>
 
-      <main className={`relative z-10 pt-89 ${view === 'chat' ? 'pb-144' : 'pb-34'}`}>
+      <main className={`relative z-10 pt-89 ${view === 'chat' ? 'pb-[180px]' : 'pb-34'}`}>
         <div className="max-w-[1440px] mx-auto w-full px-13 md:px-21">
           {isAdmin && <div className="pt-21"><HealthBanner health={health} t={t} /></div>}
           {content}
@@ -941,6 +952,7 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
           <form
             onSubmit={(e) => {
               e.preventDefault();
+              if (voice.listening) voice.stop();
               handleSend();
             }}
             className="w-full glass-panel p-5 rounded-13 border-neon-cyan/34 flex items-end gap-0 relative min-h-[55px] shadow-[0_0_21px_rgba(0,230,118,0.3)] focus-within:border-neon-cyan"
@@ -963,6 +975,22 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
               maxLength={8000}
               className="flex-1 bg-transparent border-none focus:ring-0 focus:outline-none text-13 p-13 text-parchment placeholder:text-neon-cyan/34 font-medium min-w-0 resize-none silk-scroll w-full"
             />
+            {voice.supported && (
+              <button
+                type="button"
+                onClick={toggleVoice}
+                aria-pressed={voice.listening}
+                aria-label={voice.listening ? t.voiceStop : t.voiceStart}
+                title={voice.listening ? t.voiceStop : t.voiceStart}
+                className={`w-34 h-34 self-end mb-5 mr-5 flex items-center justify-center rounded-8 border transition-all shrink-0 ${
+                  voice.listening
+                    ? 'bg-cyber-red/21 border-cyber-red text-cyber-red animate-pulse'
+                    : 'border-neon-cyan/34 text-neon-cyan hover:bg-neon-cyan/13'
+                }`}
+              >
+                {voice.listening ? <MicOff className="w-21 h-21" aria-hidden /> : <Mic className="w-21 h-21" aria-hidden />}
+              </button>
+            )}
             <button
               type="submit"
               disabled={isSending || !input.trim()}
@@ -972,7 +1000,12 @@ export function MainApp({ explanationId, onExplanationRouteHandled }: MainAppPro
               {isSending ? <Loader2 className="w-21 h-21 animate-spin" aria-hidden /> : <Send className="w-21 h-21" aria-hidden />}
             </button>
           </form>
-          <p className="text-right text-[9px] text-parchment/55 pr-8">{t.disclaimer}</p>
+          {voice.listening && <p className="text-right text-[10px] text-cyber-red pr-8" role="status">{t.voiceListening}</p>}
+          {voice.error && !voice.listening && (
+            <p className="text-right text-[10px] text-amber-500 pr-8" role="status">
+              {voice.error === 'mic-blocked' ? t.voiceBlocked : t.voiceFailed}
+            </p>
+          )}
         </div>
       )}
     </div>

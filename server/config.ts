@@ -93,5 +93,9 @@ export const config = {
     free: parseInt(process.env.DAILY_LIMIT_FREE || "20", 10),
     subscriber: parseInt(process.env.DAILY_LIMIT_SUBSCRIBER || "200", 10),
     freeExplanations: parseInt(process.env.FREE_EXPLANATIONS || "3", 10),
+    /** Guest questions per device (hashed IP) per day, however many guest accounts it makes. */
+    anonymousPerDevice: parseInt(process.env.DAILY_LIMIT_ANONYMOUS_DEVICE || "10", 10),
+    /** Safety cap on AI requests for the whole site per day (protects the AI bill). */
+    globalDaily: parseInt(process.env.GLOBAL_DAILY_AI_LIMIT || "500", 10),
   },
 };

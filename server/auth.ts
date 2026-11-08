@@ -3,6 +3,7 @@
  * Every endpoint that spends AI tokens goes through `requireUser` + `consumeQuota`.
  */
 import type { Request, Response, NextFunction } from "express";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminAuth, getDb } from "./firebaseAdmin.js";
 import { config } from "./config.js";
@@ -12,6 +13,32 @@ export interface AuthedUser {
   email?: string;
   isAnonymous: boolean;
   isAdmin: boolean;
+  /** Salted hash of the caller's IP address (never the raw IP), for per-device limits. */
+  ipKey?: string;
+}
+
+/**
+ * The caller's real IP. On Vercel `x-real-ip` / `x-vercel-forwarded-for` are set by the
+ * platform and cannot be forged by the browser; other headers are only a fallback.
+ */
+export function clientIp(req: Request): string {
+  const h = (name: string) => String(req.headers[name] || "").split(",")[0].trim();
+  return h("x-real-ip") || h("x-vercel-forwarded-for") || h("x-forwarded-for") || req.ip || "unknown";
+}
+
+/** A salted, one-way hash of the IP so we can count per device without storing IP addresses. */
+export function ipKeyOf(req: Request): string {
+  return createHash("sha256")
+    .update(`${config.ledgerSecret || "arthashastra"}|${clientIp(req)}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/** Compares secrets in constant time (no timing leaks). */
+export function safeEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
 }
 
 export interface AuthedRequest extends Request {
@@ -38,6 +65,7 @@ export async function decode(req: Request): Promise<AuthedUser | null> {
       uid: decoded.uid,
       email,
       isAnonymous: decoded.firebase?.sign_in_provider === "anonymous",
+      ipKey: ipKeyOf(req),
       isAdmin:
         decoded.admin === true ||
         (!!email && decoded.email_verified === true && config.adminEmails.includes(email)),
@@ -81,14 +109,12 @@ export async function refundQuota(user: AuthedUser, cost = 1): Promise<void> {
   if (user.isAdmin) return;
   const db = getDb();
   if (!db) return;
-  try {
-    await db
-      .collection("usage")
-      .doc(`${user.uid}_${today()}`)
-      .update({ count: FieldValue.increment(-cost) });
-  } catch {
-    /* best effort */
-  }
+  const dec = { count: FieldValue.increment(-cost) };
+  await Promise.all([
+    db.collection("usage").doc(`${user.uid}_${today()}`).update(dec).catch(() => {}),
+    user.ipKey ? db.collection("usage_ip").doc(`${user.ipKey}_${today()}`).update(dec).catch(() => {}) : null,
+    db.collection("system").doc(`ai_budget_${today()}`).update(dec).catch(() => {}),
+  ]);
 }
 
 /**
@@ -108,9 +134,27 @@ export async function consumeQuota(user: AuthedUser, cost = 1): Promise<{ used: 
       ? config.limits.subscriber
       : config.limits.free;
 
+  // 1) Whole-site safety cap: protects the AI bill from floods and runaway bugs.
+  const budgetRef = db.collection("system").doc(`ai_budget_${today()}`);
+  const budget = await budgetRef.get();
+  if (((budget.exists ? (budget.get("count") as number) : 0) || 0) + cost > config.limits.globalDaily) {
+    console.error("[quota] global daily AI cap reached:", config.limits.globalDaily);
+    throw new HttpError(503, "DAILY_CAPACITY", "Arthashastra has reached today's capacity. Please come back tomorrow.");
+  }
+
   const ref = db.collection("usage").doc(`${user.uid}_${today()}`);
+  // 2) Per-device cap for guests: new anonymous accounts are free to create, so the
+  //    limit must follow the device (hashed IP), not just the account.
+  const ipRef = user.isAnonymous && user.ipKey ? db.collection("usage_ip").doc(`${user.ipKey}_${today()}`) : null;
   const used = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
+    const [snap, ipSnap] = await Promise.all([tx.get(ref), ipRef ? tx.get(ipRef) : Promise.resolve(null)]);
+    if (ipRef && ipSnap) {
+      const ipUsed = ipSnap.exists ? (ipSnap.get("count") as number) || 0 : 0;
+      if (ipUsed + cost > config.limits.anonymousPerDevice) {
+        throw new HttpError(429, "DAILY_LIMIT", "Daily guest limit reached on this device. Sign in with Google for more questions.");
+      }
+      tx.set(ipRef, { date: today(), count: ipUsed + cost, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    }
     const current = snap.exists ? (snap.get("count") as number) || 0 : 0;
     if (current + cost > limit) {
       throw new HttpError(
@@ -130,6 +174,7 @@ export async function consumeQuota(user: AuthedUser, cost = 1): Promise<{ used: 
     );
     return current + cost;
   });
+  await budgetRef.set({ date: today(), count: FieldValue.increment(cost) }, { merge: true });
   return { used, limit };
 }
 
@@ -140,7 +185,7 @@ export async function consumeQuota(user: AuthedUser, cost = 1): Promise<{ used: 
 const hits = new Map<string, number[]>();
 export function burstLimit(maxPerMinute: number) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown";
+    const ip = clientIp(req);
     // Separate bucket per route, so heavy chat use does not block other features.
     const key = `${req.baseUrl}${req.path}|${ip}`;
     const now = Date.now();

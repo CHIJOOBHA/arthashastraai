@@ -84,6 +84,9 @@ export function HealthBanner({ health, t }: { health: Health | null; t: Translat
       <AlertTriangle className={`w-21 h-21 shrink-0 ${bad ? 'text-cyber-red' : 'text-amber-500'}`} aria-hidden />
       <div className="text-13">
         <p className={`font-bold ${bad ? 'text-cyber-red' : 'text-amber-500'}`}>{bad ? t.healthUnconfigured : t.healthWarn}</p>
+        {health.aiProblem === 'billing' && (
+          <p className="text-[11px] text-parchment/80 mt-3 break-words">{t.healthBilling}</p>
+        )}
         {health.missingKeys.length > 0 && (
           <p className="text-[11px] font-mono text-parchment/80 mt-3 break-words">
             {t.healthMissingKeys} {health.missingKeys.join(', ')}
