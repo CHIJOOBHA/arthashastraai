@@ -66,7 +66,7 @@ const en = {
     'See how ordinary people are being cheated — hidden fees, inflation, scams, debt traps — with sources you can check yourself.',
   signInGoogle: 'Sign in with Google',
   useAnonymously: 'Continue without an account',
-  anonNote: 'Without an account the daily limit is lower. Sign in with Google to subscribe, share or join the Arena.',
+  anonNote: 'Without an account the daily limit is lower. Sign in with Google to save more questions and share answers.',
   signInFailed: 'Sign-in failed',
   signInBlockedTitle: 'Sign-in blocked',
   signInBlockedBody: 'Sign-in does not work inside this preview window. Open Arthashastra in a new tab to sign in?',
