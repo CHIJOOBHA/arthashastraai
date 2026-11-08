@@ -16,7 +16,7 @@ const FRIENDLY: Record<string, string> = {
   AUTH_REQUIRED: 'Please sign in first.',
   DAILY_LIMIT: 'You have reached today\'s limit.',
   RATE_LIMITED: 'Too many requests. Please wait a minute.',
-  RESOURCE_EXHAUSTED: 'The AI is busy right now. Please try again later.',
+  RESOURCE_EXHAUSTED: 'Too many people are asking right now. Please try again in a few minutes.',
   AI_UNAVAILABLE: 'The AI could not answer right now. Please try again in a minute.',
   CONFIGURATION_REQUIRED: 'The server is not fully configured yet.',
   DATABASE_UNAVAILABLE: 'The database is not configured yet.',
@@ -110,6 +110,8 @@ export interface Health {
   databaseId: string;
   paymentsConfigured: boolean;
   missingKeys: string[];
+  /** 'billing' when the AI account recently ran out of credit. */
+  aiProblem?: string | null;
 }
 export const getHealth = () => request<Health>('/api/health', { auth: false });
 

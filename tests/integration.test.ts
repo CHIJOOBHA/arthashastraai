@@ -316,17 +316,24 @@ test("share builds the transcript from stored messages; only the owner can share
   ]);
 });
 
-test("gazette is generated once per day and cached", { skip }, async () => {
+test("gazette is written by the daily cron, cached, and readers cannot trigger it", { skip }, async () => {
   const u = await signUp("gazette@example.com");
-  const first = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
-  assert.equal(first.status, 200, JSON.stringify(first.body));
-  assert.equal(first.body.status, "ready");
-  assert.ok(first.body.sources.length >= 2);
-  assert.equal(first.body.stories.length, 1);
-  assert.equal(first.body.stories[0].verdict, "corrected");
-  assert.ok(first.body.stories[0].sources.length >= 2);
-  const second = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
-  assert.equal(second.body.headline, first.body.headline);
+  const denied = await request(app).post("/api/chronicle/today").set("Authorization", `Bearer ${u.token}`).send({});
+  assert.equal(denied.status, 403);
+  const noSecret = await request(app).get("/api/cron/gazette");
+  assert.equal(noSecret.status, 401);
+
+  const cron = await request(app).get("/api/cron/gazette").set("Authorization", "Bearer test_cron_secret");
+  assert.equal(cron.status, 200, JSON.stringify(cron.body));
+  assert.equal(cron.body.status, "ready");
+  const first = (await db.collection("chronicles").doc(new Date().toISOString().slice(0, 10)).get()).data();
+  assert.equal(first.status, "ready");
+  assert.ok(first.sources.length >= 2);
+  assert.equal(first.stories.length, 1);
+  assert.equal(first.stories[0].verdict, "corrected");
+  assert.ok(first.stories[0].sources.length >= 2);
+  const second = await request(app).get("/api/cron/gazette").set("Authorization", "Bearer test_cron_secret");
+  assert.equal(second.body.status, "ready");
 });
 
 test("risk radar is saved with its sources", { skip }, async () => {

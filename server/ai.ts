@@ -12,6 +12,7 @@ import { GoogleGenAI } from "@google/genai";
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "./config.js";
 import { HttpError } from "./auth.js";
+import { getDb } from "./firebaseAdmin.js";
 
 export interface Source {
   title: string;
@@ -120,10 +121,34 @@ function isRetryable(err: unknown): boolean {
 function isQuota(err: unknown): boolean {
   return /429|RESOURCE_EXHAUSTED|quota|rate limit|credit balance/i.test(msgOf(err));
 }
+/** The AI account has run out of paid credit (an owner problem, not a busy server). */
+function isBilling(err: unknown): boolean {
+  return /credit balance|billing|insufficient_quota|payment required|402/i.test(msgOf(err));
+}
+
+/**
+ * Remember (for the admin's health banner) that the AI account is out of credit.
+ * Written at most once every 10 minutes per server instance; never blocks the reply.
+ */
+let lastBillingNote = 0;
+function noteBillingProblem() {
+  if (Date.now() - lastBillingNote < 600_000) return;
+  lastBillingNote = Date.now();
+  const db = getDb();
+  if (!db) return;
+  db.collection("system").doc("ai_status").set({ problem: "billing", at: Date.now() }, { merge: true }).catch(() => {});
+}
+
 function aiUnavailable(err: unknown): HttpError {
   if (err instanceof HttpError) return err;
+  if (isBilling(err)) {
+    console.error("[ai] AI account is out of credit:", msgOf(err).slice(0, 200));
+    noteBillingProblem();
+    // Readers are told the truth that matters to them: the service is down, not "busy".
+    return new HttpError(503, "AI_UNAVAILABLE", "The AI service is temporarily down. Please try again later.");
+  }
   return isQuota(err)
-    ? new HttpError(429, "RESOURCE_EXHAUSTED", "The AI is busy right now (quota reached). Please try again later.")
+    ? new HttpError(429, "RESOURCE_EXHAUSTED", "Too many people are asking right now. Please try again in a few minutes.")
     : new HttpError(503, "AI_UNAVAILABLE", "The AI could not answer right now. Please try again in a minute.");
 }
 

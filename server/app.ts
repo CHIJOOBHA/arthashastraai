@@ -95,8 +95,15 @@ export function createApp() {
   app.get("/api/health", route(async (_req, res) => {
     const fb = await firebaseStatus();
     const ai = aiConfigured();
+    // Did the AI account run out of credit in the last 30 minutes? (Shown to the admin as a banner.)
+    let aiProblem: string | null = null;
+    if (fb.ready) {
+      const s = await getDb()?.collection("system").doc("ai_status").get().catch(() => null);
+      if (s?.exists && Date.now() - ((s.get("at") as number) || 0) < 30 * 60_000) aiProblem = String(s.get("problem") || "") || null;
+    }
     res.json({
-      status: ai && fb.ready ? "active" : ai ? "warn" : "unconfigured",
+      status: ai && fb.ready && !aiProblem ? "active" : ai ? "warn" : "unconfigured",
+      aiProblem,
       geminiConfigured: ai, // kept for older clients: true when ANY AI provider is configured
       aiProviders: aiProviderStatus().providers,
       firestoreReady: fb.ready,
@@ -279,84 +286,99 @@ export function createApp() {
   );
 
   // ---------- Daily Gazette (one shared edition per day) ----------
+  // Written automatically by the daily cron; an admin can also start it by hand.
+  // Ordinary readers cannot trigger it, so a failing AI cannot be retried (and paid for) by every visitor.
+  async function buildChronicle(wrap: <T>(fn: () => Promise<T>) => Promise<T>): Promise<{ status: number; body: any }> {
+    const db = requireDb();
+    const date = today();
+    const ref = db.collection("chronicles").doc(date);
+    const existing = await ref.get();
+    if (existing.exists && existing.get("status") === "ready") return { status: 200, body: existing.data() };
+
+    // Claim the generation so many readers do not trigger many AI calls.
+    const claimed = await db.runTransaction(async (tx) => {
+      const s = await tx.get(ref);
+      if (s.exists && (s.get("status") === "ready" || Date.now() - (s.get("startedAt") || 0) < 120_000)) return false;
+      tx.set(ref, { id: date, date, status: "generating", startedAt: Date.now() }, { merge: true });
+      return true;
+    });
+    if (!claimed) return { status: 202, body: { id: date, date, status: "generating" } };
+
+    try {
+      // Two AI calls (writer + independent fact-checker) count as 2 against the quota.
+      const { parsed, checked } = await wrap(async () => {
+        const result = await generate(`Write the Gazette for ${date}.`, { system: CHRONICLE(), grounded: true, effort: "high" });
+        const parsed = extractJson<any>(result.text);
+        if (!parsed || !Array.isArray(parsed.stories) || !parsed.stories.length || !result.sources.length) {
+          throw new HttpError(503, "AI_UNAVAILABLE", "Could not build a sourced edition right now. Try again later.");
+        }
+        const retrieved = await resolveSources(result.sources);
+        // Each story must point to a page that was really retrieved and be from the last few days.
+        const candidates: Finding[] = parsed.stories
+          .slice(0, 5)
+          .map((st: any) => {
+            const org = typeof st.sourceUrl === "string" ? domainOf(st.sourceUrl).split(".").slice(-2).join(".") : "";
+            return {
+              headline: String(st.title || "").slice(0, 200),
+              whatHappened: String(st.whatHappened || "").slice(0, 1000),
+              country: String(st.region || "Global").slice(0, 60),
+              date: String(st.date || date).slice(0, 10),
+              sourceUrl: st.sourceUrl,
+              sources: org ? retrieved.filter((r) => domainOf(r.url).split(".").slice(-2).join(".") === org).slice(0, 3) : [],
+              effectOnPeople: String(st.effectOnPeople || st.whoPays || "").slice(0, 800),
+            };
+          })
+          .filter((c: any) => c.headline && c.whatHappened && c.sources.length && isRecent(c.date, 4));
+        const checked = await factCheck(candidates);
+        return { parsed, checked: checked.map((v) => ({ ...v, effectOnPeople: (candidates.find((c: any) => c.headline === v.headline) as any)?.effectOnPeople || "" })) };
+      });
+      if (!checked.length) {
+        throw new HttpError(503, "AI_UNAVAILABLE", "No story passed independent fact-checking today. Try again later.");
+      }
+      const sources = [...new Map(checked.flatMap((c) => c.sources).map((x) => [x.url, x])).values()];
+      const chronicle = {
+        id: date,
+        date,
+        status: "ready",
+        headline: String(parsed.headline || "Today in the economy").slice(0, 120),
+        summary: String(parsed.summary || "").slice(0, 800),
+        stories: checked.map((c) => ({
+          title: c.headline,
+          whatHappened: c.whatHappened,
+          effectOnPeople: c.effectOnPeople,
+          region: c.country,
+          verdict: c.verdict,
+          verificationNote: c.verificationNote,
+          sources: c.sources,
+        })),
+        sources,
+        createdAt: FieldValue.serverTimestamp(),
+      };
+      await ref.set(chronicle);
+      return { status: 200, body: { ...chronicle, createdAt: new Date().toISOString() } };
+    } catch (e) {
+      await ref.set({ status: "failed", startedAt: 0 }, { merge: true });
+      throw e;
+    }
+  }
+
   app.post(
     "/api/chronicle/today",
     burstLimit(5),
     requireUser,
     route(async (req, res) => {
-      const db = requireDb();
-      const date = today();
-      const ref = db.collection("chronicles").doc(date);
-      const existing = await ref.get();
-      if (existing.exists && existing.get("status") === "ready") return res.json(existing.data());
-
-      // Claim the generation so many readers do not trigger many AI calls.
-      const claimed = await db.runTransaction(async (tx) => {
-        const s = await tx.get(ref);
-        if (s.exists && (s.get("status") === "ready" || Date.now() - (s.get("startedAt") || 0) < 120_000)) return false;
-        tx.set(ref, { id: date, date, status: "generating", startedAt: Date.now() }, { merge: true });
-        return true;
-      });
-      if (!claimed) return res.status(202).json({ id: date, date, status: "generating" });
-
-      try {
-        // Two AI calls (writer + independent fact-checker) count as 2 against the quota.
-        const { parsed, checked } = await charged(req, 2, async () => {
-          const result = await generate(`Write the Gazette for ${date}.`, { system: CHRONICLE(), grounded: true, effort: "high" });
-          const parsed = extractJson<any>(result.text);
-          if (!parsed || !Array.isArray(parsed.stories) || !parsed.stories.length || !result.sources.length) {
-            throw new HttpError(503, "AI_UNAVAILABLE", "Could not build a sourced edition right now. Try again later.");
-          }
-          const retrieved = await resolveSources(result.sources);
-          // Each story must point to a page that was really retrieved and be from the last few days.
-          const candidates: Finding[] = parsed.stories
-            .slice(0, 5)
-            .map((st: any) => {
-              const org = typeof st.sourceUrl === "string" ? domainOf(st.sourceUrl).split(".").slice(-2).join(".") : "";
-              return {
-                headline: String(st.title || "").slice(0, 200),
-                whatHappened: String(st.whatHappened || "").slice(0, 1000),
-                country: String(st.region || "Global").slice(0, 60),
-                date: String(st.date || date).slice(0, 10),
-                sourceUrl: st.sourceUrl,
-                sources: org ? retrieved.filter((r) => domainOf(r.url).split(".").slice(-2).join(".") === org).slice(0, 3) : [],
-                effectOnPeople: String(st.effectOnPeople || st.whoPays || "").slice(0, 800),
-              };
-            })
-            .filter((c: any) => c.headline && c.whatHappened && c.sources.length && isRecent(c.date, 4));
-          const checked = await factCheck(candidates);
-          return { parsed, checked: checked.map((v) => ({ ...v, effectOnPeople: (candidates.find((c: any) => c.headline === v.headline) as any)?.effectOnPeople || "" })) };
-        });
-        if (!checked.length) {
-          throw new HttpError(503, "AI_UNAVAILABLE", "No story passed independent fact-checking today. Try again later.");
-        }
-        const sources = [...new Map(checked.flatMap((c) => c.sources).map((x) => [x.url, x])).values()];
-        const chronicle = {
-          id: date,
-          date,
-          status: "ready",
-          headline: String(parsed.headline || "Today in the economy").slice(0, 120),
-          summary: String(parsed.summary || "").slice(0, 800),
-          stories: checked.map((c) => ({
-            title: c.headline,
-            whatHappened: c.whatHappened,
-            effectOnPeople: c.effectOnPeople,
-            region: c.country,
-            verdict: c.verdict,
-            verificationNote: c.verificationNote,
-            sources: c.sources,
-          })),
-          sources,
-          createdAt: FieldValue.serverTimestamp(),
-        };
-        await ref.set(chronicle);
-        res.json({ ...chronicle, createdAt: new Date().toISOString() });
-      } catch (e) {
-        await ref.set({ status: "failed", startedAt: 0 }, { merge: true });
-        throw e;
-      }
+      if (!req.user!.isAdmin) throw new HttpError(403, "FORBIDDEN", "Today's edition is published automatically every morning.");
+      const out = await buildChronicle((fn) => charged(req, 2, fn));
+      res.status(out.status).json(out.body);
     }),
   );
+  const chronicleCron = route(async (req, res) => {
+    const header = req.headers.authorization || "";
+    if (!config.cronSecret || header !== `Bearer ${config.cronSecret}`) throw new HttpError(401, "AUTH_REQUIRED", "Cron only.");
+    const out = await buildChronicle((fn) => fn());
+    res.status(out.status).json({ status: out.body?.status || "done" });
+  });
+  app.get("/api/cron/gazette", chronicleCron);
 
   // ---------- Explanations behind the paywall ----------
   const explanation = route(async (req, res) => {
