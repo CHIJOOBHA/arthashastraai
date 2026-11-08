@@ -400,7 +400,7 @@ export default function AgentRotationPanel({ user: userProp }: AgentRotationPane
                             {item.sources.map((s, i) => (
                               <a
                                 key={i}
-                                href={s.url}
+                                href={safeUrl(s.url) || undefined}
                                 target="_blank"
                                 rel="noopener noreferrer nofollow"
                                 className="inline-flex items-center gap-3 text-neon-cyan/80 hover:text-neon-cyan underline mr-8 break-all"

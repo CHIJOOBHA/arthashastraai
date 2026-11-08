@@ -6,7 +6,7 @@ import express, { Request, Response, NextFunction } from "express";
 import { FieldValue } from "firebase-admin/firestore";
 import { config } from "./config.js";
 import { getDb, requireDb, firebaseStatus } from "./firebaseAdmin.js";
-import { requireUser, decode, consumeQuota, refundQuota, burstLimit, isSubscribed, AuthedRequest, HttpError } from "./auth.js";
+import { requireUser, decode, consumeQuota, refundQuota, burstLimit, isSubscribed, safeEqual, AuthedRequest, HttpError } from "./auth.js";
 import { generate, generateStream, finalAnswer, resolveSources, extractJson, aiConfigured, aiProviderStatus, type AiResult } from "./ai.js";
 
 /** Separates the live draft from the final, cited answer in the chat stream. */
@@ -172,7 +172,8 @@ export function createApp() {
         // Replace the draft with the final version: inline [n] citations, sources and unsupported-figure warnings.
         if (result) res.write(FINAL_MARKER + (await presentable(result)).text);
       } catch (e) {
-        res.write(`\n\n_[The answer was interrupted: ${(e as Error).message}]_`);
+        console.error("[chat] stream interrupted:", (e as Error)?.message);
+        res.write(`\n\n_[The answer was interrupted: ${e instanceof HttpError ? e.message : "please try again."}]_`);
       }
       res.end();
     }),
@@ -374,7 +375,7 @@ export function createApp() {
   );
   const chronicleCron = route(async (req, res) => {
     const header = req.headers.authorization || "";
-    if (!config.cronSecret || header !== `Bearer ${config.cronSecret}`) throw new HttpError(401, "AUTH_REQUIRED", "Cron only.");
+    if (!config.cronSecret || !safeEqual(header, `Bearer ${config.cronSecret}`)) throw new HttpError(401, "AUTH_REQUIRED", "Cron only.");
     const out = await buildChronicle((fn) => fn());
     res.status(out.status).json({ status: out.body?.status || "done" });
   });
@@ -439,7 +440,7 @@ export function createApp() {
   // ---------- agent cycle (Vercel Cron or an admin) ----------
   const cycle = route(async (req, res) => {
     const header = req.headers.authorization || "";
-    const viaCron = !!config.cronSecret && header === `Bearer ${config.cronSecret}`;
+    const viaCron = !!config.cronSecret && safeEqual(header, `Bearer ${config.cronSecret}`);
     if (!viaCron) {
       // Otherwise the caller must be a signed-in admin.
       const user = await decode(req);
@@ -459,7 +460,7 @@ export function createApp() {
     "/api/admin/exam",
     route(async (req, res) => {
       const token = process.env.EXAM_TOKEN || "";
-      if (token.length < 32 || req.query.token !== token) throw new HttpError(404, "NOT_FOUND", "Not found");
+      if (token.length < 32 || typeof req.query.token !== "string" || !safeEqual(req.query.token, token)) throw new HttpError(404, "NOT_FOUND", "Not found");
       const { CASES, runCase, judgeSymmetry } = await import("../scripts/eval.js");
       if (req.query.symmetry === "1") {
         const [a, b] = await Promise.all([runCase(CASES.find((c) => c.id === "6a")!), runCase(CASES.find((c) => c.id === "6b")!)]);

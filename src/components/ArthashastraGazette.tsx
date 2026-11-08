@@ -26,6 +26,8 @@ const shiftYmd = (s: string, days: number) => {
   return toYmd(d);
 };
 const localToday = () => toYmd(new Date());
+/** Only http(s) links are ever made clickable (blocks javascript: and data: links). */
+const safeHref = (u: unknown) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : undefined);
 /** The server dates editions in UTC; it can be a day ahead of the reader's local date. */
 const utcToday = () => new Date().toISOString().slice(0, 10);
 const latestAllowed = () => (utcToday() > localToday() ? utcToday() : localToday());
@@ -318,7 +320,7 @@ export function ArthashastraGazette({ initialDate, user, isAdmin = false }: Gaze
                         <ul className="space-y-2 text-[11px]" aria-label="Sources for this story">
                           {story.sources.map((src, i) => (
                             <li key={src.url}>
-                              <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" className="text-neon-cyan/89 hover:underline break-all">
+                              <a href={safeHref(src.url)} target="_blank" rel="noopener noreferrer nofollow" className="text-neon-cyan/89 hover:underline break-all">
                                 [{i + 1}] {src.title}
                               </a>
                             </li>
@@ -338,7 +340,7 @@ export function ArthashastraGazette({ initialDate, user, isAdmin = false }: Gaze
                     {chronicle.sources.map((src, i) => (
                       <li key={i} className="text-13 text-parchment/55 leading-tight flex items-start gap-8">
                         <ExternalLink className="w-[11px] h-[11px] mt-[3px] text-neon-cyan/55 shrink-0" />
-                        <a href={src.url} target="_blank" rel="noopener noreferrer nofollow" className="hover:text-neon-cyan underline decoration-neon-cyan/21 break-words">
+                        <a href={safeHref(src.url)} target="_blank" rel="noopener noreferrer nofollow" className="hover:text-neon-cyan underline decoration-neon-cyan/21 break-words">
                           {src.title || src.url}
                         </a>
                       </li>

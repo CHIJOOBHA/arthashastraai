@@ -91,7 +91,7 @@ service cloud.firestore {
           onlyKeys(['id', 'role', 'text', 'userId', 'index', 'hash', 'previousHash', 'timestamp', 'createdAt']) &&
           data().userId == request.auth.uid &&
           data().role in ['user', 'model'] &&
-          str(data().text, 100000);
+          str(data().text, 60000);
         // Messages are never edited, but the owner may delete them (right to erasure / archiving).
         allow delete: if signedIn() &&
           get(/databases/$(database)/documents/conversations/$(id)).data.userId == request.auth.uid;
@@ -105,25 +105,22 @@ service cloud.firestore {
       allow delete: if signedIn() && resource.data.userId == request.auth.uid;
     }
 
-    // Personal day-by-day memory blocks. Doc id = "<uid>_<YYYY-MM-DD>".
+    // Old personal calendar and cold-archive data (feature retired). Owners can still
+    // read, export and delete what they saved, but nothing new can be written — this
+    // stops anyone from using the database as free unlimited storage.
     match /temporal_blocks/{id} {
       allow get, delete: if signedIn() && id.matches(request.auth.uid + '_.*');
       allow list: if signedIn() && resource.data.userId == request.auth.uid;
-      allow create, update: if signedIn() && id.matches(request.auth.uid + '_.*') &&
-        data().userId == request.auth.uid;
     }
-
-    // Personal cold storage of old conversations.
     match /cold_archives/{id} {
       allow read, delete: if signedIn() && resource.data.userId == request.auth.uid;
-      allow create: if signedIn() && data().userId == request.auth.uid;
     }
 
     // Personal audit trail of archive actions.
     match /audit_log/{id} {
       allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
       allow create: if signedIn() && data().userId == request.auth.uid &&
-        onlyKeys(['userId', 'action', 'details', 'timestamp']) && str(data().action, 100);
+        onlyKeys(['userId', 'action', 'details', 'timestamp']) && str(data().action, 100) && str(data().details, 1000);
     }
 
     // ---------- the Arena (public debates) ----------

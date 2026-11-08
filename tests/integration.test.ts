@@ -23,6 +23,8 @@ process.env.AITIHYA_SIGNING_SECRET = "test_ledger_secret";
 process.env.CRON_SECRET = "test_cron_secret";
 process.env.DAILY_LIMIT_ANONYMOUS = "2";
 process.env.DAILY_LIMIT_FREE = "4";
+process.env.DAILY_LIMIT_ANONYMOUS_DEVICE = "3";
+process.env.GLOBAL_DAILY_AI_LIMIT = "1000";
 process.env.ADMIN_EMAILS = "";
 
 let request: any, app: any, db: any;
@@ -155,12 +157,41 @@ test("chat streams an answer with real source links appended", { skip }, async (
 
 test("daily quota is enforced per user (anonymous limit 2)", { skip }, async () => {
   const u = await signUp();
-  const call = () => request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).send({ message: "hi" });
+  const call = () => request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).set("X-Real-IP", "10.0.0.1").send({ message: "hi" });
   assert.equal((await call()).status, 200);
   assert.equal((await call()).status, 200);
   const third = await call();
   assert.equal(third.status, 429);
   assert.equal(third.body.code, "DAILY_LIMIT");
+});
+
+test("guests cannot dodge the limit by making new anonymous accounts (per-device cap 3)", { skip }, async () => {
+  const ask = async (ip: string) => {
+    const u = await signUp();
+    return request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).set("X-Real-IP", ip).send({ message: "hi" });
+  };
+  // Three fresh guest accounts from one device: allowed.
+  for (let i = 0; i < 3; i++) assert.equal((await ask("10.0.0.2")).status, 200);
+  // A fourth fresh guest account from the same device is blocked…
+  const blocked = await ask("10.0.0.2");
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.code, "DAILY_LIMIT");
+  // …while another device is unaffected.
+  assert.equal((await ask("10.0.0.3")).status, 200);
+  // Raw IP addresses are never stored, only a salted hash.
+  const docs = await db.collection("usage_ip").get();
+  assert.ok(docs.size >= 1);
+  for (const d of docs.docs) assert.ok(!d.id.includes("10.0.0"), "raw IP must not be stored");
+});
+
+test("site-wide daily AI cap stops everything once reached", { skip }, async () => {
+  const date = new Date().toISOString().slice(0, 10);
+  await db.collection("system").doc(`ai_budget_${date}`).set({ count: 1000 });
+  const u = await signUp("capped@example.com");
+  const res = await request(app).post("/api/chat").set("Authorization", `Bearer ${u.token}`).send({ message: "hi" });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.code, "DAILY_CAPACITY");
+  await db.collection("system").doc(`ai_budget_${date}`).set({ count: 0 });
 });
 
 test("message validation", { skip }, async () => {

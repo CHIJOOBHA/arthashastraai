@@ -536,7 +536,15 @@ export async function* generateStream(
 export async function resolveSources(sources: Source[], timeoutMs = 2500): Promise<Source[]> {
   return Promise.all(
     sources.map(async (s) => {
-      if (!/grounding-api-redirect|vertexaisearch/.test(s.url)) return s;
+      // Only Google's own grounding redirect host is ever fetched by our server (no SSRF).
+      let host = "";
+      try {
+        const u = new URL(s.url);
+        host = u.protocol === "https:" ? u.hostname : "";
+      } catch {
+        return s;
+      }
+      if (host !== "vertexaisearch.cloud.google.com") return s;
       try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), timeoutMs);
